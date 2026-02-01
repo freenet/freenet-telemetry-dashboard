@@ -273,6 +273,95 @@ function handleMessage(data, callbacks) {
         } else {
             console.error('Failed to set name:', data.error);
         }
+
+    } else if (data.type === 'event_batch') {
+        // Server-side batched events (performance optimization)
+        const events = data.events || [];
+        const MAX_EVENTS = 50000;
+
+        for (const event of events) {
+            if (state.allEvents.length >= MAX_EVENTS) {
+                state.allEvents.splice(0, MAX_EVENTS * 0.1);
+            }
+            state.allEvents.push(event);
+
+            if (callbacks.trackTransactionFromEvent) {
+                callbacks.trackTransactionFromEvent(event);
+            }
+            if (callbacks.addEventMarker) {
+                callbacks.addEventMarker(event);
+            }
+        }
+
+        if (events.length > 0) {
+            state.timeRange.end = events[events.length - 1].timestamp;
+            if (state.isLive) {
+                state.currentTime = state.timeRange.end;
+                callbacks.updateView();
+            }
+        }
+
+    } else if (data.type === 'peers_removed') {
+        // Server cleaned up stale peers - remove them from local state
+        const removedAnonIds = new Set(data.peers || []);       // Anonymized IDs (peer-abc123)
+        const removedPeerIds = new Set(data.peer_ids || []);    // Raw telemetry peer_ids
+        const removedConns = data.connections || [];
+
+        if (removedAnonIds.size > 0) {
+            // Remove peers from initialStatePeers
+            state.initialStatePeers = state.initialStatePeers.filter(
+                p => !removedAnonIds.has(p.id)
+            );
+
+            // Remove connections involving removed peers
+            state.initialStateConnections = state.initialStateConnections.filter(
+                conn => !removedAnonIds.has(conn[0]) && !removedAnonIds.has(conn[1])
+            );
+
+            // Remove from peer presence
+            state.peerPresence = state.peerPresence.filter(
+                p => !removedAnonIds.has(p.id)
+            );
+
+            // Clean contract data: remove stale peers from subscription/seeding info
+            for (const [key, contract] of Object.entries(state.contractData)) {
+                if (contract.subscribers) {
+                    contract.subscribers = contract.subscribers.filter(
+                        id => !removedAnonIds.has(id)
+                    );
+                }
+                if (contract.peer_states) {
+                    contract.peer_states = contract.peer_states.filter(
+                        ps => !removedPeerIds.has(ps.peer_id)
+                    );
+                    contract.peer_count = contract.peer_states.length;
+                }
+            }
+
+            // Clean contract states (keyed by raw telemetry peer_id)
+            for (const [key, peerStates] of Object.entries(state.contractStates)) {
+                for (const peerId of Object.keys(peerStates)) {
+                    if (removedPeerIds.has(peerId)) {
+                        delete peerStates[peerId];
+                    }
+                }
+                if (Object.keys(peerStates).length === 0) {
+                    delete state.contractStates[key];
+                }
+            }
+
+            // Clear selection if the selected peer was removed
+            if (state.selectedPeerId && removedAnonIds.has(state.selectedPeerId)) {
+                state.selectedPeerId = null;
+                state.highlightedPeers = new Set();
+            }
+
+            console.log(`Removed ${removedAnonIds.size} stale peers, ${removedConns.length} connections`);
+
+            if (state.isLive) {
+                callbacks.updateView();
+            }
+        }
     }
 }
 

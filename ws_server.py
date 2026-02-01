@@ -417,6 +417,179 @@ def prune_old_transactions():
             del transactions[old_tx_id]
 
 
+# Stale data cleanup threshold (same as topology filtering)
+STALE_PEER_THRESHOLD_NS = 30 * 60 * 1_000_000_000  # 30 minutes
+STALE_PENDING_OP_NS = 5 * 60 * 1_000_000_000       # 5 minutes (ops should complete quickly)
+STALE_PROPAGATION_NS = 2 * 60 * 60 * 1_000_000_000  # 2 hours (match event history)
+
+
+def cleanup_stale_peers():
+    """Remove all data for peers that haven't reported in STALE_PEER_THRESHOLD_NS.
+
+    This is the authoritative cleanup: instead of just filtering at read-time,
+    we delete stale entries from every in-memory data structure to prevent
+    unbounded memory growth.
+
+    Returns list of (anonymized_id, ip) tuples for peers that were removed,
+    plus list of removed connection pairs, so callers can broadcast removals.
+    """
+    now_ns = int(time.time() * 1_000_000_000)
+    cutoff = now_ns - STALE_PEER_THRESHOLD_NS
+
+    # 1. Find stale peer IPs
+    stale_ips = set()
+    for ip, data in peers.items():
+        if data.get("last_seen", 0) < cutoff:
+            stale_ips.add(ip)
+
+    if not stale_ips:
+        return [], [], set()
+
+    # 2. Collect peer_ids associated with stale IPs (for contract/seeding cleanup)
+    stale_peer_ids = set()
+    for ip in stale_ips:
+        peer_id = ip_to_peer_id.get(ip)
+        if peer_id:
+            stale_peer_ids.add(peer_id)
+        # Also check attrs mapping
+        peer_data = peers.get(ip)
+        if peer_data and peer_data.get("peer_id"):
+            stale_peer_ids.add(peer_data["peer_id"])
+
+    stale_anon_ids = set()
+    for ip in stale_ips:
+        stale_anon_ids.add(anonymize_ip(ip))
+
+    # 3. Remove from peers dict
+    removed_peers = []
+    for ip in stale_ips:
+        data = peers.pop(ip, None)
+        if data:
+            removed_peers.append((data["id"], ip))
+
+    # 4. Remove from IP <-> peer_id mappings
+    for ip in stale_ips:
+        pid = ip_to_peer_id.pop(ip, None)
+        if pid:
+            peer_id_to_ip.pop(pid, None)
+
+    # 5. Remove from attrs_peer_id_to_ip
+    stale_attrs_pids = [pid for pid, ip in attrs_peer_id_to_ip.items() if ip in stale_ips]
+    for pid in stale_attrs_pids:
+        del attrs_peer_id_to_ip[pid]
+        stale_peer_ids.add(pid)  # Also clean contract data for attrs peer_ids
+
+    # 6. Remove from peer_presence
+    for ip in stale_ips:
+        peer_presence.pop(ip, None)
+
+    # 7. Remove from peer_lifecycle
+    for pid in stale_peer_ids:
+        peer_lifecycle.pop(pid, None)
+
+    # 8. Remove connections involving stale peers
+    removed_connections = []
+    stale_conns = {conn for conn in connections if conn & stale_ips}
+    for conn in stale_conns:
+        connections.discard(conn)
+        ips = list(conn)
+        if len(ips) == 2:
+            removed_connections.append((anonymize_ip(ips[0]), anonymize_ip(ips[1])))
+            # Clean up connection sets on the surviving peer
+            for ip in ips:
+                if ip not in stale_ips and ip in peers:
+                    peers[ip]["connections"] -= stale_ips
+
+    # 9. Remove stale peer_ids from seeding_state
+    for contract_key in list(seeding_state.keys()):
+        for pid in stale_peer_ids:
+            seeding_state[contract_key].pop(pid, None)
+        if not seeding_state[contract_key]:
+            del seeding_state[contract_key]
+
+    # 10. Remove stale peer_ids from contract_states
+    for contract_key in list(contract_states.keys()):
+        for pid in stale_peer_ids:
+            contract_states[contract_key].pop(pid, None)
+        if not contract_states[contract_key]:
+            del contract_states[contract_key]
+
+    # 11. Remove stale peers from subscriptions
+    for contract_key in list(subscriptions.keys()):
+        sub_data = subscriptions[contract_key]
+        sub_data["subscribers"] -= stale_anon_ids
+        # Clean broadcast tree
+        for sender_id in list(sub_data["tree"].keys()):
+            if sender_id in stale_anon_ids:
+                del sub_data["tree"][sender_id]
+            else:
+                sub_data["tree"][sender_id] -= stale_anon_ids
+                if not sub_data["tree"][sender_id]:
+                    del sub_data["tree"][sender_id]
+        # Remove empty subscription entries
+        if not sub_data["subscribers"] and not sub_data["tree"]:
+            del subscriptions[contract_key]
+
+    # 12. Remove stale peers from contract_propagation peer lists
+    for contract_key in list(contract_propagation.keys()):
+        prop = contract_propagation[contract_key]
+        prop_peers = prop.get("peers", {})
+        for pid in stale_peer_ids:
+            prop_peers.pop(pid, None)
+        if not prop_peers and "current_hash" in prop:
+            del contract_propagation[contract_key]
+
+    if removed_peers:
+        print(f"[cleanup] Removed {len(removed_peers)} stale peers, "
+              f"{len(removed_connections)} connections, "
+              f"{len(stale_peer_ids)} peer_ids from contract data")
+
+    return removed_peers, removed_connections, stale_peer_ids
+
+
+def cleanup_stale_pending_ops():
+    """Remove pending operations that have been stuck for too long.
+
+    Operations that never received a success/failure response leak in pending_ops.
+    This cleans them up after STALE_PENDING_OP_NS.
+    """
+    now_ns = int(time.time() * 1_000_000_000)
+    cutoff = now_ns - STALE_PENDING_OP_NS
+
+    stale_tx_ids = [
+        tx_id for tx_id, op in pending_ops.items()
+        if op.get("start_ns", 0) < cutoff
+    ]
+    for tx_id in stale_tx_ids:
+        del pending_ops[tx_id]
+
+    if stale_tx_ids:
+        print(f"[cleanup] Removed {len(stale_tx_ids)} stale pending operations")
+
+
+def cleanup_stale_propagation():
+    """Remove old contract propagation tracking data.
+
+    Propagation data older than STALE_PROPAGATION_NS is no longer useful
+    for the dashboard (matches event history window).
+    """
+    now_ns = int(time.time() * 1_000_000_000)
+    cutoff = now_ns - STALE_PROPAGATION_NS
+
+    stale_keys = []
+    for contract_key, prop in contract_propagation.items():
+        first_seen = prop.get("first_seen", 0)
+        last_seen = prop.get("last_seen", first_seen)
+        if last_seen < cutoff:
+            stale_keys.append(contract_key)
+
+    for key in stale_keys:
+        del contract_propagation[key]
+
+    if stale_keys:
+        print(f"[cleanup] Removed {len(stale_keys)} stale propagation entries")
+
+
 def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, body_type=None):
     """Track an event as part of a transaction for timeline lanes.
 
@@ -1158,8 +1331,8 @@ def get_network_state():
     """Get current network state for new clients."""
     import time
     now_ns = time.time_ns()
-    # Consider peers stale if not seen in last 30 minutes (generous for stable gateways)
-    STALE_THRESHOLD_NS = 30 * 60 * 1_000_000_000
+    # Use the same threshold as periodic cleanup (safety net for between-cleanup queries)
+    STALE_THRESHOLD_NS = STALE_PEER_THRESHOLD_NS
 
     # Build reverse lookup: IP -> attrs_peer_id(s) that sent events with this IP
     ip_to_attrs_peer_ids = {}
@@ -1369,6 +1542,41 @@ async def flush_event_buffer():
             # Send as batch message
             batch_msg = json_encode({"type": "event_batch", "events": events_to_send})
             await asyncio.gather(*[client.send(batch_msg) for client in clients], return_exceptions=True)
+
+
+CLEANUP_INTERVAL_SECONDS = 60  # Run cleanup every 60 seconds
+
+
+async def periodic_cleanup():
+    """Periodically clean up all stale data and broadcast removals to clients."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+        try:
+            # Clean stale peers (and their contract/seeding/subscription data)
+            removed_peers, removed_connections, stale_peer_ids = cleanup_stale_peers()
+
+            # Clean leaked pending operations
+            cleanup_stale_pending_ops()
+
+            # Clean old propagation tracking
+            cleanup_stale_propagation()
+
+            # Broadcast removals to connected clients so they update in real-time
+            if clients and (removed_peers or removed_connections):
+                anon_ids = [peer_id for peer_id, _ip in removed_peers]
+                removal_msg = json_encode({
+                    "type": "peers_removed",
+                    "peers": anon_ids,
+                    "peer_ids": list(stale_peer_ids),  # Raw telemetry peer_ids for contract cleanup
+                    "connections": list(removed_connections),
+                })
+                await asyncio.gather(
+                    *[client.send(removal_msg) for client in clients],
+                    return_exceptions=True,
+                )
+        except Exception as e:
+            print(f"[cleanup] Error during periodic cleanup: {e}")
 
 
 async def tail_log():
@@ -1631,10 +1839,11 @@ async def main():
         max_size=50 * 1024 * 1024,  # 50MB max message size for large history
         process_request=process_request,  # Capture X-Forwarded-For headers
     ):
-        # Start log tailer and event buffer flusher concurrently
+        # Start log tailer, event buffer flusher, and periodic cleanup concurrently
         await asyncio.gather(
             tail_log(),
-            flush_event_buffer()
+            flush_event_buffer(),
+            periodic_cleanup(),
         )
 
 
