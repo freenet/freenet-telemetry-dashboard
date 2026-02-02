@@ -336,6 +336,11 @@ function handleMessage(data, callbacks) {
                     );
                     contract.peer_count = contract.peer_states.length;
                 }
+                // Remove empty contract entries
+                if ((!contract.subscribers || contract.subscribers.length === 0) &&
+                    (!contract.peer_states || contract.peer_states.length === 0)) {
+                    delete state.contractData[key];
+                }
             }
 
             // Clean contract states (keyed by raw telemetry peer_id)
