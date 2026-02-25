@@ -125,10 +125,11 @@ export function renderExponentialTimeline() {
 
     const laneHeight = (height - (NUM_LANES - 1) * LANE_GAP) / NUM_LANES;
 
-    // Draw lane backgrounds
+    // Draw lane backgrounds (theme-aware)
+    const isLightMode = document.documentElement.getAttribute('data-theme') === 'light';
     for (let i = 0; i < NUM_LANES; i++) {
         const y = i * (laneHeight + LANE_GAP);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.02)';
+        ctx.fillStyle = isLightMode ? 'rgba(0, 0, 0, 0.02)' : 'rgba(255, 255, 255, 0.02)';
         ctx.fillRect(0, y, width, laneHeight);
     }
 
@@ -183,8 +184,9 @@ function drawTicks(ctx, tNow, totalDurationNs, width, height) {
         const x = timeToX(tNow - tick.ageNs, tNow, totalDurationNs, width);
         if (x < 15 || x > width - 15) continue;
 
-        // Tick mark
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+        // Tick mark (theme-aware: white for dark mode, dark for light mode)
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        ctx.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.2)' : 'rgba(255, 255, 255, 0.15)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -192,7 +194,7 @@ function drawTicks(ctx, tNow, totalDurationNs, width, height) {
         ctx.stroke();
 
         // Label
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+        ctx.fillStyle = isLight ? 'rgba(0, 0, 0, 0.45)' : 'rgba(255, 255, 255, 0.35)';
         ctx.fillText(tick.label, x, height - 2);
     }
 }

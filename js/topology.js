@@ -215,8 +215,8 @@ function getOrCreateStaticSvg() {
             </feMerge>
         </filter>
         <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#1a2a2a;stop-opacity:1" />
-            <stop offset="100%" style="stop-color:#0a1515;stop-opacity:1" />
+            <stop offset="0%" style="stop-color:var(--bg-primary);stop-opacity:1" />
+            <stop offset="100%" style="stop-color:var(--bg-secondary);stop-opacity:1" />
         </linearGradient>
         <marker id="arrow-connect" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#7ecfef"/>

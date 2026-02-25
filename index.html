@@ -10,29 +10,40 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/styles.css?v=20260222a">
     <script>
-        // Apply saved theme before render to avoid flash
+        // Apply saved theme before render to avoid flash of wrong theme.
+        // Wrapped in try/catch because localStorage throws in Safari private browsing.
+        // Icon convention: ☀️ = "switch to light", 🌙 = "switch to dark" (shows target mode).
+        // This script is intentionally a plain <script> (not a module) so it runs
+        // synchronously before render and so toggleTheme() is accessible via onclick.
         (function() {
-            const saved = localStorage.getItem('theme');
-            if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+            try {
+                if (localStorage.getItem('theme') === 'light') {
+                    document.documentElement.setAttribute('data-theme', 'light');
+                }
+            } catch (e) { /* localStorage unavailable (private browsing) — default to dark */ }
         })();
 
         function toggleTheme() {
             const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+            const icon = document.getElementById('theme-icon');
             if (isLight) {
+                // Switching to dark (default) — remove the key; no need to store default
                 document.documentElement.removeAttribute('data-theme');
-                localStorage.setItem('theme', 'dark');
-                document.getElementById('theme-icon').textContent = '☀️';
+                if (icon) icon.textContent = '☀️';
+                try { localStorage.removeItem('theme'); } catch (e) {}
             } else {
+                // Switching to light
                 document.documentElement.setAttribute('data-theme', 'light');
-                localStorage.setItem('theme', 'light');
-                document.getElementById('theme-icon').textContent = '🌙';
+                if (icon) icon.textContent = '🌙';
+                try { localStorage.setItem('theme', 'light'); } catch (e) {}
             }
         }
 
-        // Sync icon after DOM ready
+        // Sync icon on load when light mode was restored from localStorage
         document.addEventListener('DOMContentLoaded', function() {
-            if (document.documentElement.getAttribute('data-theme') === 'light') {
-                document.getElementById('theme-icon').textContent = '🌙';
+            const icon = document.getElementById('theme-icon');
+            if (icon && document.documentElement.getAttribute('data-theme') === 'light') {
+                icon.textContent = '🌙';
             }
         });
     </script>

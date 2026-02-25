@@ -51,15 +51,22 @@
             background-image:
                 linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
         }
 
         [data-theme="light"] .contract-search-input {
             background: rgba(255, 255, 255, 0.8);
         }
 
+        [data-theme="light"] * {
+            scrollbar-color: #94a3b8 var(--bg-secondary);
+        }
+        [data-theme="light"] *::-webkit-scrollbar-thumb { background: #94a3b8; }
+        [data-theme="light"] *::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        /* Dark scrollbars */
+        /* Scrollbars (light mode overrides below) */
         * {
             scrollbar-width: thin;
             scrollbar-color: #30363d var(--bg-secondary);
