@@ -9,6 +9,33 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/styles.css?v=20260222a">
+    <script>
+        // Apply saved theme before render to avoid flash
+        (function() {
+            const saved = localStorage.getItem('theme');
+            if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        })();
+
+        function toggleTheme() {
+            const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+            if (isLight) {
+                document.documentElement.removeAttribute('data-theme');
+                localStorage.setItem('theme', 'dark');
+                document.getElementById('theme-icon').textContent = '☀️';
+            } else {
+                document.documentElement.setAttribute('data-theme', 'light');
+                localStorage.setItem('theme', 'light');
+                document.getElementById('theme-icon').textContent = '🌙';
+            }
+        }
+
+        // Sync icon after DOM ready
+        document.addEventListener('DOMContentLoaded', function() {
+            if (document.documentElement.getAttribute('data-theme') === 'light') {
+                document.getElementById('theme-icon').textContent = '🌙';
+            }
+        });
+    </script>
 </head>
 <body>
     <div class="main-content">
@@ -18,9 +45,14 @@
                     <img src="https://freenet.org/freenet_logo.svg" alt="Freenet" class="header-logo">
                     <h1>FREENET</h1>
                 </div>
-                <div class="status-badge">
-                    <span id="status-dot" class="status-dot"></span>
-                    <span id="status-text">Connecting...</span>
+                <div class="header-controls">
+                    <div class="status-badge">
+                        <span id="status-dot" class="status-dot"></span>
+                        <span id="status-text">Connecting...</span>
+                    </div>
+                    <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode" onclick="toggleTheme()">
+                        <span class="theme-toggle-icon" id="theme-icon">☀️</span>
+                    </button>
                 </div>
             </header>
 

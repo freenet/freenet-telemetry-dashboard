@@ -34,11 +34,35 @@
             100% { background-position: 200% center; }
         }
 
+        .header-controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .theme-toggle {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 6px 12px;
+            font-size: 1em;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            line-height: 1;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .theme-toggle:hover {
+            border-color: var(--accent-primary);
+            background: var(--bg-tertiary);
+        }
+
         .status-badge {
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            margin-top: 12px;
             padding: 6px 16px;
             background: var(--bg-panel);
             border: 1px solid var(--border-color);

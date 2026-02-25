@@ -27,7 +27,47 @@
             --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
         }
 
+        /* Light mode overrides */
+        [data-theme="light"] {
+            --bg-primary: #f0f4f8;
+            --bg-secondary: #e2e8f0;
+            --bg-tertiary: #cbd5e1;
+            --bg-panel: rgba(255, 255, 255, 0.85);
+            --border-color: rgba(148, 163, 184, 0.5);
+            --border-glow: rgba(0, 127, 255, 0.15);
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+        }
+
+        [data-theme="light"] body::before {
+            background:
+                radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 50%, rgba(126, 207, 239, 0.04) 0%, transparent 40%),
+                radial-gradient(ellipse at 20% 80%, rgba(0, 82, 204, 0.04) 0%, transparent 40%);
+        }
+
+        [data-theme="light"] body::after {
+            background-image:
+                linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
+        }
+
+        [data-theme="light"] .contract-search-input {
+            background: rgba(255, 255, 255, 0.8);
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        /* Dark scrollbars */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #30363d var(--bg-secondary);
+        }
+        *::-webkit-scrollbar { width: 8px; height: 8px; }
+        *::-webkit-scrollbar-track { background: var(--bg-secondary); }
+        *::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+        *::-webkit-scrollbar-thumb:hover { background: #484f58; }
 
         body {
             font-family: var(--font-sans);
