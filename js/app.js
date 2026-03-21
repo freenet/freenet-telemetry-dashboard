@@ -26,7 +26,7 @@ import {
     updateContractDropdown
 } from './contracts.js';
 import {
-    connect, showPeerNamingPrompt, closePeerNamingPrompt
+    connect, showPeerNamingPrompt, closePeerNamingPrompt, queryFlows
 } from './websocket.js';
 import { initTransferChart, addTransferEvents, addTransferEvent, renderTransferChart } from './transfers.js';
 import { updateContractTree, getTreeStats, resetContractTree, triggerTreeMessageAnim, buildTree } from './contract-tree.js';
@@ -222,10 +222,19 @@ function startFullReplay() {
 
 /**
  * Re-collect flows for the current replay range with current filters.
- * Call this when contract/peer filters change while replay is active.
+ * Tries server-side query first (pre-computed flows from SQLite),
+ * falls back to client-side collection from allEvents.
  */
 function refreshReplay() {
     if (!state.replayRange || _cachedPeers.size === 0) return;
+    // Request server-side flows (faster, covers full history)
+    queryFlows(
+        state.replayRange.startNs,
+        state.replayRange.endNs,
+        state.selectedContract,
+        state.selectedPeerId
+    );
+    // Also start with client-side flows immediately (server result will replace)
     const flows = collectFlowsForRange(state.replayRange.startNs, state.replayRange.endNs);
     startReplay(flows, _cachedPeers);
 }
@@ -362,12 +371,17 @@ connect({
         startFullReplay();
     },
     onMetricsData: () => {
-        // Update chart if performance tab is active
         if (state.rightPanelTab === 'performance') {
             updateMetricsChart();
         }
         if (state.rightPanelTab === 'versions') {
             updateVersionsChart();
+        }
+    },
+    onFlowsResult: (data) => {
+        // Server-side pre-computed flows — replace client-side flows if we have peers
+        if (data.flows && data.flows.length > 0 && _cachedPeers.size > 0) {
+            startReplay(data.flows, _cachedPeers);
         }
     }
 });

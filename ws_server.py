@@ -15,6 +15,8 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+
+from telemetry_db import TelemetryDB
 from collections import deque
 
 import orjson
@@ -213,6 +215,9 @@ HISTORY_EVENT_TYPES = {
 REALTIME_EVENT_TYPES = HISTORY_EVENT_TYPES | {
     "connect_connected", "connect_rejected", "disconnect",
 }
+
+# SQLite database for persistent event/transaction/flow storage
+db = TelemetryDB()
 
 # Connected WebSocket clients - now managed via ClientHandler for backpressure
 clients = set()  # Set of ClientHandler instances
@@ -1082,6 +1087,9 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
         "peer_id": peer_id,
     })
 
+    # Write transaction event to DB
+    db.insert_tx_event(tx_id, timestamp, display_event_type, peer_id)
+
     # Update operation type if we now have a more specific one
     if op_type and tx["op"] == "unknown":
         tx["op"] = op_type
@@ -1100,6 +1108,19 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
     # Update contract if not set
     if contract_key and not tx["contract"]:
         tx["contract"] = contract_key
+
+    # Persist transaction to DB and compute flows when it completes
+    contract_short = tx["contract"][:12] + "..." if tx["contract"] else None
+    duration_ms = None
+    if tx["start_ns"] and tx["end_ns"]:
+        duration_ms = (tx["end_ns"] - tx["start_ns"]) / 1_000_000
+    db.upsert_transaction(
+        tx_id, tx["op"], tx["contract"], contract_short,
+        tx["start_ns"], tx["end_ns"] or tx["start_ns"],
+        tx["status"], duration_ms, len(tx["events"])
+    )
+    if is_end:
+        db.compute_flows_for_tx(tx_id)
 
 
 def process_record(record, store_history=True):
@@ -1644,11 +1665,10 @@ def process_record(record, store_history=True):
         # Track this event as part of the transaction (pass body_type for specific connect events)
         track_transaction(tx_id, event_type, timestamp, event["peer_id"], contract_key, body_type)
 
-    # Store in history buffer (only "interesting" events to keep buffer useful
-    # over hours rather than seconds — see HISTORY_EVENT_TYPES)
+    # Store in history buffer and SQLite DB
     if store_history and event_type in HISTORY_EVENT_TYPES:
         event_history.append(event)
-        # Periodically prune old events
+        db.insert_event(event)
         if len(event_history) % 100 == 0:
             prune_old_events()
 
@@ -1963,32 +1983,36 @@ def get_transactions_list():
 def get_history():
     """Get event history for time-travel feature.
 
-    Sends a capped subset of recent events/transactions to limit initial
-    payload size.  The full history remains in memory for real-time streaming.
+    Uses SQLite DB for persistent history if available, falls back to
+    in-memory event_history deque.
     """
-    prune_old_events()
-    # Send only the most recent MAX_INITIAL_EVENTS to clients on connect
-    all_events = list(event_history)
-    events_list = all_events[-MAX_INITIAL_EVENTS:] if len(all_events) > MAX_INITIAL_EVENTS else all_events
+    # Try DB first — has deeper history that survives restarts
+    db_event_count = db.event_count()
+    if db_event_count > 0:
+        events_list = db.get_recent_events(limit=MAX_INITIAL_EVENTS)
+        HISTORY_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
+        tx_list = db.get_recent_transactions(limit=MAX_INITIAL_TRANSACTIONS, ops=HISTORY_TX_OPS)
+        start_ns, end_ns = db.get_time_range()
+    else:
+        # Fallback to in-memory
+        prune_old_events()
+        all_events = list(event_history)
+        events_list = all_events[-MAX_INITIAL_EVENTS:] if len(all_events) > MAX_INITIAL_EVENTS else all_events
+        HISTORY_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
+        tx_list = [tx for tx in get_transactions_list() if tx["op"] in HISTORY_TX_OPS]
+        if len(tx_list) > MAX_INITIAL_TRANSACTIONS:
+            tx_list = tx_list[-MAX_INITIAL_TRANSACTIONS:]
+        start_ns = events_list[0]["timestamp"] if events_list else 0
+        end_ns = events_list[-1]["timestamp"] if events_list else 0
 
-    # Sort peer presence by first_seen for historical reconstruction
     sorted_presence = sorted(peer_presence.values(), key=lambda p: p["first_seen"])
-
-    # Only send contract-relevant transactions in initial history.
-    HISTORY_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
-    tx_list = [tx for tx in get_transactions_list() if tx["op"] in HISTORY_TX_OPS]
-    if len(tx_list) > MAX_INITIAL_TRANSACTIONS:
-        tx_list = tx_list[-MAX_INITIAL_TRANSACTIONS:]
 
     return {
         "type": "history",
         "events": events_list,
         "transactions": tx_list,
         "peer_presence": sorted_presence,
-        "time_range": {
-            "start": all_events[0]["timestamp"] if all_events else 0,
-            "end": all_events[-1]["timestamp"] if all_events else 0,
-        }
+        "time_range": {"start": start_ns, "end": end_ns},
     }
 
 
@@ -2091,6 +2115,16 @@ async def periodic_cleanup():
                           f"max_queue={max_qsize}/{CLIENT_QUEUE_MAX}, "
                           f"total_dropped={total_dropped}, "
                           f"event_history={len(event_history)}/{MAX_HISTORY_EVENTS}")
+            # Flush and maintain SQLite DB
+            db.flush()
+            db.prune()
+            # Store current file offset for resume on restart
+            try:
+                offset = TELEMETRY_LOG.stat().st_size
+                db.set_meta("ingest_offset", str(offset))
+            except FileNotFoundError:
+                pass
+
         except Exception as e:
             print(f"[cleanup] Error during periodic cleanup: {e}")
 
@@ -2300,6 +2334,24 @@ async def handle_client(websocket):
                             "success": False,
                             "error": "Cannot identify your peer"
                         }))
+
+                elif msg_type == "query_flows":
+                    # Server-side flow query for replay animation
+                    start_ns = msg.get("start_ns")
+                    end_ns = msg.get("end_ns")
+                    contract = msg.get("contract")
+                    peer = msg.get("peer_id")
+                    if start_ns and end_ns:
+                        flows = db.get_flows_for_range(
+                            int(start_ns), int(end_ns), contract, peer
+                        )
+                        await handler.send_direct(json_encode({
+                            "type": "flows_result",
+                            "flows": flows,
+                            "start_ns": start_ns,
+                            "end_ns": end_ns,
+                        }))
+
             except orjson.JSONDecodeError:
                 pass
     except websockets.exceptions.ConnectionClosed:
@@ -2313,11 +2365,36 @@ async def handle_client(websocket):
 
 
 async def load_initial_state():
-    """Load existing telemetry to build initial network state and history."""
+    """Load existing telemetry to build initial network state.
+
+    If SQLite DB has data, the event/transaction history is already persisted.
+    We still need to parse the JSONL log to rebuild live in-memory state
+    (peers, connections, contract_states, etc.) but can resume from where we
+    left off using the stored byte offset.
+    """
     if not TELEMETRY_LOG.exists():
         return
 
-    print("Loading initial state from telemetry log...", flush=True)
+    # Check if we can resume from a stored position
+    stored_offset = db.get_meta("ingest_offset")
+    file_size = TELEMETRY_LOG.stat().st_size
+    resume_offset = 0
+
+    db_events = db.event_count()
+    if stored_offset and db_events > 0:
+        stored_offset = int(stored_offset)
+        if stored_offset <= file_size:
+            resume_offset = stored_offset
+            print(f"DB has {db_events} events, {db.flow_count()} flows. "
+                  f"Resuming JSONL from byte {resume_offset}/{file_size} "
+                  f"({100 * resume_offset / file_size:.0f}% skipped)", flush=True)
+        else:
+            # File was truncated/rotated — full re-ingest
+            print(f"JSONL file smaller than stored offset, full re-ingest", flush=True)
+
+    if resume_offset == 0:
+        print("Loading initial state from telemetry log...", flush=True)
+
     count = 0
     history_stored = 0
     history_eligible = 0
@@ -2325,6 +2402,11 @@ async def load_initial_state():
     history_cutoff = now_ns - MAX_HISTORY_AGE_NS
 
     with open(TELEMETRY_LOG, 'r') as f:
+        if resume_offset > 0:
+            f.seek(resume_offset)
+            # Skip to next complete line (we may have seeked into the middle of one)
+            f.readline()
+
         for line in f:
             if not line.strip():
                 continue
@@ -2333,7 +2415,6 @@ async def load_initial_state():
                 for resource_log in batch.get("resourceLogs", []):
                     for scope_log in resource_log.get("scopeLogs", []):
                         for record in scope_log.get("logRecords", []):
-                            # Check if event is within history window
                             timestamp_raw = record.get("timeUnixNano", "0")
                             timestamp = int(timestamp_raw) if isinstance(timestamp_raw, str) else timestamp_raw
                             store_in_history = timestamp >= history_cutoff
@@ -2348,18 +2429,28 @@ async def load_initial_state():
             except:
                 continue
 
+        # Store final position for next startup
+        final_offset = f.tell()
+        db.flush()
+        db.set_meta("ingest_offset", str(final_offset))
+
     print(f"Loaded {count} records. Found {len(peers)} peers, {len(connections)} connections.", flush=True)
     print(f"History: {history_eligible} eligible, {history_stored} stored, {len(event_history)} in buffer", flush=True)
+    print(f"DB: {db.event_count()} events, {db.flow_count()} flows", flush=True)
     print(f"Transfer events: {len(transfer_events)} transfers for scatter plot", flush=True)
     print(f"Contract states: {len(contract_states)} contracts", flush=True)
     for ck, ps in list(contract_states.items())[:3]:
         print(f"  {ck[:20]}... has {len(ps)} peers", flush=True)
-        for pid, state in list(ps.items())[:2]:
-            print(f"    peer_id={pid}: hash={state.get('hash', 'none')[:12]}", flush=True)
+        for pid, state_data in list(ps.items())[:2]:
+            print(f"    peer_id={pid}: hash={state_data.get('hash', 'none')[:12]}", flush=True)
 
 
 async def main():
     """Main entry point."""
+    # Initialize SQLite database
+    db.open()
+    print(f"SQLite DB opened at {db.db_path}")
+
     # Load peer names
     load_peer_names()
     print(f"Loaded {len(peer_names)} peer names")

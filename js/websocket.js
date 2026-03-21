@@ -394,6 +394,12 @@ function handleMessage(data, callbacks) {
 
             callbacks.updateView();
         }
+
+    } else if (data.type === 'flows_result') {
+        // Server-side pre-computed flows for replay animation
+        if (callbacks.onFlowsResult) {
+            callbacks.onFlowsResult(data);
+        }
     }
 }
 
@@ -421,6 +427,22 @@ function updatePeerLifecycleStats() {
 export function sendPeerName(name) {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
         state.ws.send(JSON.stringify({ type: 'set_peer_name', name }));
+    }
+}
+
+/**
+ * Query server for pre-computed flows in a time range.
+ * Results arrive via the 'flows_result' message handler.
+ */
+export function queryFlows(startNs, endNs, contract, peerId) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({
+            type: 'query_flows',
+            start_ns: startNs,
+            end_ns: endNs,
+            contract: contract || undefined,
+            peer_id: peerId || undefined,
+        }));
     }
 }
 
