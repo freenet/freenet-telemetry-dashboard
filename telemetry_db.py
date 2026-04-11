@@ -267,6 +267,11 @@ class TelemetryDB:
         if not start_ns or not end_ns or start_ns >= end_ns:
             return self.get_recent_events(limit)
 
+        # Cap end_ns to now + 1 hour to exclude bogus future-dated events
+        import time as _time
+        now_ns = int(_time.time() * 1_000_000_000)
+        end_ns = min(end_ns, now_ns + 3600 * 1_000_000_000)
+
         total = self.event_count()
         if total <= limit:
             cur = self.conn.execute(
