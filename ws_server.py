@@ -591,6 +591,8 @@ def precompute_metrics_from_db():
 
     Populates the in-memory metrics_buckets with historical data so the
     Performance tab shows data immediately after a server restart.
+    Uses aggregate GROUP BY query instead of fetching every row — O(index scan)
+    instead of O(200M rows).
     """
     import time as _time
     now_ns = int(_time.time() * 1_000_000_000)
@@ -602,23 +604,40 @@ def precompute_metrics_from_db():
         'update_request', 'update_success',
         'subscribed',
     )
+
+    # Use tx_events (no JSON blob column, much smaller than events table)
+    # and aggregate with GROUP BY to avoid fetching millions of rows.
     placeholders = ','.join('?' * len(metric_event_types))
+    bucket_expr = f"(timestamp_ns / {METRICS_BUCKET_NS}) * {METRICS_BUCKET_NS}"
 
     rows = db.conn.execute(f"""
-        SELECT event_type, timestamp_ns, peer_id
-        FROM events
+        SELECT event_type, {bucket_expr} as bucket, COUNT(*) as cnt
+        FROM tx_events
         WHERE timestamp_ns > ?
         AND event_type IN ({placeholders})
-        ORDER BY timestamp_ns
+        GROUP BY event_type, bucket
+        ORDER BY bucket
     """, (cutoff_ns, *metric_event_types)).fetchall()
 
     if not rows:
         return
 
-    for event_type, ts, peer_id in rows:
-        record_metric(event_type, ts, peer_id=peer_id)
+    # Map event_type -> bucket field name for bulk updates
+    _type_to_field = {
+        'put_request': 'put_req', 'put_success': 'put_ok',
+        'get_request': 'get_req', 'get_success': 'get_ok', 'get_not_found': 'get_nf',
+        'update_request': 'upd_req', 'update_success': 'upd_ok',
+        'subscribed': 'sub_ok',
+    }
+    total_events = 0
+    for event_type, bucket_ts, count in rows:
+        total_events += count
+        b = _get_or_create_bucket(bucket_ts)
+        field = _type_to_field.get(event_type)
+        if field:
+            b[field] += count
 
-    print(f"Precomputed metrics: {len(metrics_buckets)} buckets from {len(rows)} events", flush=True)
+    print(f"Precomputed metrics: {len(metrics_buckets)} buckets from {total_events} events (aggregated)", flush=True)
 
 
 def get_metrics_timeseries():
@@ -2205,6 +2224,75 @@ def json_encode(obj):
     return orjson.dumps(obj).decode('utf-8')
 
 
+# --- History cache: pre-computed and serialized every 30s in a background thread ---
+_history_cache: str | None = None
+HISTORY_CACHE_INTERVAL_SECONDS = 30
+
+
+def _build_history_in_thread(db_path, presence_snapshot):
+    """Build and serialize the history payload using a fresh DB connection.
+
+    Runs in a background thread via asyncio.to_thread() to avoid blocking
+    the event loop. Opens its own read-only DB connection for thread safety.
+    """
+    tmp_db = TelemetryDB(db_path)
+    tmp_db.open()
+    try:
+        db_event_count = tmp_db.event_count()
+        if db_event_count > 0:
+            events_list = tmp_db.get_sampled_events(limit=MAX_INITIAL_EVENTS)
+            HISTORY_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
+            tx_list = tmp_db.get_recent_transactions(limit=MAX_INITIAL_TRANSACTIONS, ops=HISTORY_TX_OPS)
+            if events_list:
+                start_ns = events_list[0]["timestamp"]
+                end_ns = events_list[-1]["timestamp"]
+            else:
+                start_ns, end_ns = tmp_db.get_time_range()
+        else:
+            events_list = []
+            tx_list = []
+            start_ns, end_ns = 0, 0
+
+        particles_list = []
+        if db_event_count > 0:
+            particles_list = tmp_db.get_events_for_range(start_ns, end_ns)
+
+        history = {
+            "type": "history",
+            "events": events_list,
+            "transactions": tx_list,
+            "flows": particles_list,
+            "peer_presence": presence_snapshot,
+            "time_range": {"start": start_ns, "end": end_ns},
+        }
+        return orjson.dumps(history).decode('utf-8')
+    finally:
+        tmp_db.close()
+
+
+async def refresh_history_cache():
+    """Refresh the cached history payload in a background thread."""
+    global _history_cache
+    try:
+        t0 = time.monotonic()
+        presence_snapshot = sorted(peer_presence.values(), key=lambda p: p["first_seen"])
+        cached = await asyncio.to_thread(
+            _build_history_in_thread, db.db_path, presence_snapshot
+        )
+        _history_cache = cached
+        dt = time.monotonic() - t0
+        print(f"[cache] History cache refreshed: {len(cached):,} bytes in {dt:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[cache] Error refreshing history cache: {e}", flush=True)
+
+
+async def periodic_history_cache():
+    """Background task: refresh history cache periodically."""
+    while True:
+        await refresh_history_cache()
+        await asyncio.sleep(HISTORY_CACHE_INTERVAL_SECONDS)
+
+
 async def broadcast(message):
     """Enqueue message to all connected clients via their bounded queues."""
     if clients:
@@ -2461,9 +2549,13 @@ async def handle_client(websocket):
         del state
 
         # Send event history for time-travel (direct send, not queued)
-        history = get_history()
-        await handler.send_direct(json_encode(history))
-        del history
+        if _history_cache:
+            await handler.send_direct(_history_cache)
+        else:
+            # Fallback: cache not yet ready (shouldn't happen after startup)
+            history = get_history()
+            await handler.send_direct(json_encode(history))
+            del history
 
         # Keep connection alive and handle messages
         async for message in websocket:
@@ -2698,6 +2790,9 @@ async def main():
     # Load existing state
     await load_initial_state()
 
+    # History cache is built by periodic_history_cache() background task.
+    # First clients use the fallback (direct query) until cache is ready.
+
     # Start WebSocket server with compression enabled
     # permessage-deflate provides ~40x compression for JSON data
     print(f"Starting WebSocket server on port {WS_PORT}...")
@@ -2714,6 +2809,7 @@ async def main():
             tail_log(),
             flush_event_buffer(),
             periodic_cleanup(),
+            periodic_history_cache(),
         )
 
 

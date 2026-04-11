@@ -269,29 +269,45 @@ class TelemetryDB:
 
         total = self.event_count()
         if total <= limit:
-            # Fewer events than limit — return all
             cur = self.conn.execute(
                 "SELECT data FROM events ORDER BY timestamp_ns"
             )
             return [orjson.loads(row[0]) for row in cur.fetchall()]
 
-        # Sample by selecting every Nth row using rowid modulo
-        # This gives even distribution regardless of event rate spikes
-        step = max(1, total // limit)
-        cur = self.conn.execute(
-            "SELECT data FROM events WHERE id % ? = 0 ORDER BY timestamp_ns LIMIT ?",
-            (step, limit),
-        )
-        return [orjson.loads(row[0]) for row in cur.fetchall()]
+        # Time-bucketed sampling: divide the time range into 100 buckets,
+        # fetch `per_bucket` events from each using the timestamp index.
+        # This avoids the full table scan of the old `id % step` approach.
+        num_buckets = 100
+        per_bucket = max(1, limit // num_buckets)
+        range_ns = end_ns - start_ns
+        bucket_ns = range_ns // num_buckets
+        results = []
+        for i in range(num_buckets):
+            bucket_start = start_ns + i * bucket_ns
+            bucket_end = bucket_start + bucket_ns
+            cur = self.conn.execute(
+                "SELECT data FROM events WHERE timestamp_ns >= ? AND timestamp_ns < ? "
+                "ORDER BY timestamp_ns LIMIT ?",
+                (bucket_start, bucket_end, per_bucket),
+            )
+            for row in cur.fetchall():
+                results.append(orjson.loads(row[0]))
+            if len(results) >= limit:
+                break
+        return results[:limit]
 
     def get_time_range(self):
         """Get (min_timestamp, max_timestamp) from events table.
-        Uses indexed MIN/MAX which are O(1) on the timestamp_ns index."""
-        cur = self.conn.execute(
-            "SELECT MIN(timestamp_ns), MAX(timestamp_ns) FROM events"
-        )
-        row = cur.fetchone()
-        return (row[0] or 0, row[1] or 0)
+        Uses two ORDER BY LIMIT 1 queries that leverage idx_events_ts index."""
+        row = self.conn.execute(
+            "SELECT timestamp_ns FROM events ORDER BY timestamp_ns ASC LIMIT 1"
+        ).fetchone()
+        min_ts = row[0] if row else 0
+        row = self.conn.execute(
+            "SELECT timestamp_ns FROM events ORDER BY timestamp_ns DESC LIMIT 1"
+        ).fetchone()
+        max_ts = row[0] if row else 0
+        return (min_ts, max_ts)
 
     def get_recent_transactions(self, limit=2000, ops=None):
         """Get recent transactions with their events.
@@ -418,8 +434,8 @@ class TelemetryDB:
                     base_sql += " AND peer_id = ?"
                     base_params.append(peer_id)
 
-                # Bucketed sampling
-                num_buckets = 50
+                # Bucketed sampling — 10 buckets for fewer DB round-trips
+                num_buckets = 10
                 per_bucket = max(1, budget // num_buckets)
                 bucket_ns = range_ns // num_buckets
                 count = 0
@@ -455,8 +471,8 @@ class TelemetryDB:
                         break
                 continue
 
-            # Always use bucketed sampling for even time distribution
-            num_buckets = 50
+            # Bucketed sampling — 10 buckets for fewer DB round-trips
+            num_buckets = 10
             per_bucket = max(1, budget // num_buckets)
             bucket_ns = range_ns // num_buckets
             count = 0
@@ -717,10 +733,12 @@ class TelemetryDB:
 
         if since_ns is None:
             # Default: last 7 days
-            max_ts = self.conn.execute("SELECT MAX(timestamp_ns) FROM events").fetchone()[0]
-            if not max_ts:
+            row = self.conn.execute(
+                "SELECT timestamp_ns FROM events ORDER BY timestamp_ns DESC LIMIT 1"
+            ).fetchone()
+            if not row:
                 return {}
-            since_ns = max_ts - 7 * 24 * 3600 * 1_000_000_000
+            since_ns = row[0] - 7 * 24 * 3600 * 1_000_000_000
 
         # Find contracts with recent transactions
         cur = self.conn.execute(
