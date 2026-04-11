@@ -434,8 +434,8 @@ class TelemetryDB:
                     base_sql += " AND peer_id = ?"
                     base_params.append(peer_id)
 
-                # Bucketed sampling — 10 buckets for fewer DB round-trips
-                num_buckets = 10
+                # Bucketed sampling (runs in background thread, not user-facing)
+                num_buckets = 50
                 per_bucket = max(1, budget // num_buckets)
                 bucket_ns = range_ns // num_buckets
                 count = 0
@@ -471,8 +471,8 @@ class TelemetryDB:
                         break
                 continue
 
-            # Bucketed sampling — 10 buckets for fewer DB round-trips
-            num_buckets = 10
+            # Bucketed sampling (runs in background thread, not user-facing)
+            num_buckets = 50
             per_bucket = max(1, budget // num_buckets)
             bucket_ns = range_ns // num_buckets
             count = 0
