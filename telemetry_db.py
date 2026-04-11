@@ -261,8 +261,12 @@ class TelemetryDB:
 
     def get_sampled_events(self, limit=10000):
         """Get events sampled evenly across the full time range.
-        Returns up to `limit` events spread across all available history,
-        ensuring good timeline coverage rather than just the last few seconds."""
+
+        Uses jittered time-grid seek sampling: generate `limit` evenly-spaced
+        target timestamps, then index-seek to the nearest event for each.
+        Two-phase for the large events table: collect rowids from the index
+        first, then batch-fetch full rows by sorted primary key.
+        """
         start_ns, end_ns = self.get_time_range()
         if not start_ns or not end_ns or start_ns >= end_ns:
             return self.get_recent_events(limit)
@@ -279,27 +283,38 @@ class TelemetryDB:
             )
             return [orjson.loads(row[0]) for row in cur.fetchall()]
 
-        # Time-bucketed sampling: divide the time range into 100 buckets,
-        # fetch `per_bucket` events from each using the timestamp index.
-        # This avoids the full table scan of the old `id % step` approach.
-        num_buckets = 100
-        per_bucket = max(1, limit // num_buckets)
+        # Phase 1: Generate evenly-spaced target timestamps and collect rowids
+        # via index-only seeks (no table access for the heavy data column).
         range_ns = end_ns - start_ns
-        bucket_ns = range_ns // num_buckets
+        step_ns = range_ns // limit
+        rowids = []
+        seen = set()
+        for i in range(limit):
+            target_ns = start_ns + i * step_ns + step_ns // 2  # midpoint of slot
+            row = self.conn.execute(
+                "SELECT id FROM events WHERE timestamp_ns >= ? ORDER BY timestamp_ns LIMIT 1",
+                (target_ns,),
+            ).fetchone()
+            if row and row[0] not in seen:
+                rowids.append(row[0])
+                seen.add(row[0])
+
+        if not rowids:
+            return []
+
+        # Phase 2: Batch-fetch full rows by sorted primary key for sequential I/O.
+        rowids.sort()
         results = []
-        for i in range(num_buckets):
-            bucket_start = start_ns + i * bucket_ns
-            bucket_end = bucket_start + bucket_ns
+        for i in range(0, len(rowids), 500):
+            chunk = rowids[i:i + 500]
+            ph = ",".join("?" * len(chunk))
             cur = self.conn.execute(
-                "SELECT data FROM events WHERE timestamp_ns >= ? AND timestamp_ns < ? "
-                "ORDER BY timestamp_ns LIMIT ?",
-                (bucket_start, bucket_end, per_bucket),
+                f"SELECT data FROM events WHERE id IN ({ph}) ORDER BY timestamp_ns",
+                chunk,
             )
             for row in cur.fetchall():
                 results.append(orjson.loads(row[0]))
-            if len(results) >= limit:
-                break
-        return results[:limit]
+        return results
 
     def get_time_range(self):
         """Get (min_timestamp, max_timestamp) from events table.
@@ -370,10 +385,123 @@ class TelemetryDB:
             })
         return result
 
+    def _seek_sample_tx_events(self, types, budget, start_ns, end_ns,
+                               contract_key=None, peer_id=None):
+        """Sample tx_events using time-grid seek: one index seek per sample point.
+
+        Generates `budget` evenly-spaced target timestamps and seeks to the
+        nearest matching event for each. Uses idx_txe_type_ts for O(log n) seeks.
+        Returns list of (timestamp_ns, event_type, peer_id, tx_id, None, None).
+        """
+        range_ns = end_ns - start_ns
+        step_ns = max(1, range_ns // budget)
+        results = []
+        seen_keys = set()  # deduplicate by (timestamp_ns, peer_id)
+
+        ph = ",".join("?" * len(types))
+
+        if contract_key:
+            sql = (f"SELECT te.timestamp_ns, te.event_type, te.peer_id, te.tx_id "
+                   f"FROM tx_events te JOIN transactions t ON te.tx_id = t.tx_id "
+                   f"WHERE te.event_type IN ({ph}) AND te.timestamp_ns >= ? "
+                   f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT 1")
+            for i in range(budget):
+                target = start_ns + i * step_ns + step_ns // 2
+                row = self.conn.execute(sql, (*types, target, contract_key)).fetchone()
+                if row and row[0] <= end_ns:
+                    key = (row[0], row[2])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        results.append((row[0], row[1], row[2], row[3], None, None))
+        elif peer_id:
+            sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
+                   f"FROM tx_events WHERE event_type IN ({ph}) "
+                   f"AND timestamp_ns >= ? AND peer_id = ? "
+                   f"ORDER BY timestamp_ns LIMIT 1")
+            for i in range(budget):
+                target = start_ns + i * step_ns + step_ns // 2
+                row = self.conn.execute(sql, (*types, target, peer_id)).fetchone()
+                if row and row[0] <= end_ns:
+                    key = (row[0], row[2])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        results.append((row[0], row[1], row[2], row[3], None, None))
+        else:
+            sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
+                   f"FROM tx_events WHERE event_type IN ({ph}) "
+                   f"AND timestamp_ns >= ? ORDER BY timestamp_ns LIMIT 1")
+            for i in range(budget):
+                target = start_ns + i * step_ns + step_ns // 2
+                row = self.conn.execute(sql, (*types, target)).fetchone()
+                if row and row[0] <= end_ns:
+                    key = (row[0], row[2])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        results.append((row[0], row[1], row[2], row[3], None, None))
+
+        return results
+
+    def _seek_sample_broadcast_events(self, types, budget, start_ns, end_ns,
+                                      contract_key=None, peer_id=None):
+        """Sample broadcast events from the events table using time-grid seeks.
+
+        Similar to _seek_sample_tx_events but reads from the events table
+        to extract from_peer/to_peer from the data JSON column.
+        """
+        range_ns = end_ns - start_ns
+        step_ns = max(1, range_ns // budget)
+        results = []
+        seen_keys = set()
+
+        ph = ",".join("?" * len(types))
+        base_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id, data "
+                    f"FROM events WHERE event_type IN ({ph}) AND timestamp_ns >= ?")
+        extra_params = []
+        if contract_key:
+            base_sql += " AND contract_key = ?"
+            extra_params.append(contract_key)
+        elif peer_id:
+            base_sql += " AND peer_id = ?"
+            extra_params.append(peer_id)
+        base_sql += " ORDER BY timestamp_ns LIMIT 1"
+
+        for i in range(budget):
+            target = start_ns + i * step_ns + step_ns // 2
+            row = self.conn.execute(base_sql, (*types, target, *extra_params)).fetchone()
+            if not row or row[0] > end_ns:
+                continue
+            key = (row[0], row[2])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            from_peer, to_peer = None, None
+            if row[4]:
+                try:
+                    d = orjson.loads(row[4])
+                    fp = d.get("from_peer")
+                    tp = d.get("to_peer")
+                    pid = d.get("peer_id")
+                    if fp and tp:
+                        from_peer, to_peer = fp, tp
+                    elif tp and pid and tp != pid:
+                        from_peer, to_peer = tp, pid
+                except Exception:
+                    pass
+            results.append((row[0], row[1], row[2], row[3], from_peer, to_peer))
+
+        return results
+
     def get_events_for_range(self, start_ns, end_ns, contract_key=None, peer_id=None):
         """Get events for particle animation, with per-type budgets.
+
+        Uses time-grid seek sampling: for each event type group, generates
+        `budget` evenly-spaced target timestamps and seeks to the nearest
+        matching event. This gives truly uniform timeline coverage with no
+        clustering at bucket boundaries.
+
         Returns a mix of 'hop' particles (peer-to-peer travel) and 'pulse'
-        particles (single-peer glow). Uses tx_events for hop reconstruction."""
+        particles (single-peer glow).
+        """
         if not self.conn:
             return []
 
@@ -410,109 +538,22 @@ class TelemetryDB:
             },
         }
 
-        # Collect events from tx_events with per-type budgets
-        # Format: (timestamp_ns, event_type, peer_id, tx_id, from_peer_or_None, to_peer_or_None)
         all_events = []
 
         for group_name, group in TYPE_BUDGETS.items():
-            # Skip connect when filtering by contract — connect events don't have contract keys
             if group_name == 'connect' and contract_key:
                 continue
 
             types = group['types']
             budget = group['limit']
-            ph = ",".join("?" * len(types))
 
-            # For broadcast events, query events table to get from_peer/to_peer from data JSON
-            use_events_table = (group_name == 'broadcast')
-
-            if use_events_table:
-                # Query events table with data JSON for broadcast src/dest
-                base_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id, data "
-                            f"FROM events WHERE event_type IN ({ph}) "
-                            f"AND timestamp_ns BETWEEN ? AND ?")
-                base_params = list(types) + [start_ns, end_ns]
-                if contract_key:
-                    base_sql += " AND contract_key = ?"
-                    base_params.append(contract_key)
-                elif peer_id:
-                    base_sql += " AND peer_id = ?"
-                    base_params.append(peer_id)
-
-                # Bucketed sampling (runs in background thread, not user-facing)
-                num_buckets = 50
-                per_bucket = max(1, budget // num_buckets)
-                bucket_ns = range_ns // num_buckets
-                count = 0
-                for b in range(num_buckets):
-                    bs = start_ns + b * bucket_ns
-                    be = bs + bucket_ns
-                    bp = list(base_params)
-                    bp[len(types)] = bs  # start_ns param
-                    bp[len(types) + 1] = be  # end_ns param
-                    sql = base_sql + f" ORDER BY timestamp_ns LIMIT {per_bucket}"
-                    cur = self.conn.execute(sql, bp)
-                    for row in cur.fetchall():
-                        # Extract from_peer/to_peer from data JSON
-                        # For broadcast events: from_peer = sender, to_peer = receiver
-                        from_peer, to_peer = None, None
-                        if row[4]:
-                            try:
-                                d = orjson.loads(row[4])
-                                fp = d.get("from_peer")
-                                tp = d.get("to_peer")
-                                pid = d.get("peer_id")
-                                if fp and tp:
-                                    # New format: both set correctly
-                                    from_peer, to_peer = fp, tp
-                                elif tp and pid and tp != pid:
-                                    # Old format: to_peer was actually the requester (sender)
-                                    from_peer, to_peer = tp, pid
-                            except Exception:
-                                pass
-                        all_events.append((row[0], row[1], row[2], row[3], from_peer, to_peer))
-                        count += 1
-                    if count >= budget:
-                        break
-                continue
-
-            # Bucketed sampling (runs in background thread, not user-facing)
-            num_buckets = 50
-            per_bucket = max(1, budget // num_buckets)
-            bucket_ns = range_ns // num_buckets
-            count = 0
-
-            if contract_key:
-                bucket_sql = (f"SELECT te.timestamp_ns, te.event_type, te.peer_id, te.tx_id "
-                              f"FROM tx_events te JOIN transactions t ON te.tx_id = t.tx_id "
-                              f"WHERE te.event_type IN ({ph}) AND te.timestamp_ns BETWEEN ? AND ? "
-                              f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, contract_key, per_bucket]
-            elif peer_id:
-                bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
-                              f"FROM tx_events WHERE event_type IN ({ph}) "
-                              f"AND timestamp_ns BETWEEN ? AND ? AND peer_id = ? "
-                              f"ORDER BY timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, peer_id, per_bucket]
+            if group_name == 'broadcast':
+                events = self._seek_sample_broadcast_events(
+                    types, budget, start_ns, end_ns, contract_key, peer_id)
             else:
-                bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
-                              f"FROM tx_events WHERE event_type IN ({ph}) "
-                              f"AND timestamp_ns BETWEEN ? AND ? "
-                              f"ORDER BY timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, per_bucket]
-
-            for b in range(num_buckets):
-                bs = start_ns + b * bucket_ns
-                be = bs + bucket_ns
-                bp = list(base_params)
-                bp[len(types)] = bs
-                bp[len(types) + 1] = be
-                cur = self.conn.execute(bucket_sql, bp)
-                for row in cur.fetchall():
-                    all_events.append((row[0], row[1], row[2], row[3], None, None))
-                    count += 1
-                if count >= budget:
-                    break
+                events = self._seek_sample_tx_events(
+                    types, budget, start_ns, end_ns, contract_key, peer_id)
+            all_events.extend(events)
 
         if not all_events:
             return []
