@@ -2636,7 +2636,10 @@ async def handle_client(websocket):
                                 return tmp.get_events_for_range(_s, _e, _c, _p)
                             finally:
                                 tmp.close()
+                        t0 = time.monotonic()
                         particles = await asyncio.to_thread(_query_flows)
+                        dt = time.monotonic() - t0
+                        print(f"[query_flows] peer={_p} contract={_c} range={(_e-_s)//1_000_000_000}s -> {len(particles)} particles in {dt:.1f}s", flush=True)
                         await handler.send_direct(json_encode({
                             "type": "flows_result",
                             "flows": particles,

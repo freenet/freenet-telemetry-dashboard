@@ -446,6 +446,10 @@ class TelemetryDB:
 
             # For broadcast events, query events table to get from_peer/to_peer from data JSON
             use_events_table = (group_name == 'broadcast')
+            # When filtering by contract/peer, skip bucketing — result set is naturally
+            # small, so one query per event-type group is faster than 50 bucketed queries
+            # (which each scan the type-ts index even for buckets with no matches).
+            filtered = bool(contract_key or peer_id)
 
             if use_events_table:
                 # Query events table with data JSON for broadcast src/dest
@@ -460,22 +464,8 @@ class TelemetryDB:
                     base_sql += " AND peer_id = ?"
                     base_params.append(peer_id)
 
-                # Bucketed sampling (runs in background thread, not user-facing)
-                num_buckets = 50
-                per_bucket = max(1, budget // num_buckets)
-                bucket_ns = range_ns // num_buckets
-                count = 0
-                for b in range(num_buckets):
-                    bs = start_ns + b * bucket_ns
-                    be = bs + bucket_ns
-                    bp = list(base_params)
-                    bp[len(types)] = bs  # start_ns param
-                    bp[len(types) + 1] = be  # end_ns param
-                    sql = base_sql + f" ORDER BY timestamp_ns LIMIT {per_bucket}"
-                    cur = self.conn.execute(sql, bp)
+                def _collect_broadcast(cur):
                     for row in cur.fetchall():
-                        # Extract from_peer/to_peer from data JSON
-                        # For broadcast events: from_peer = sender, to_peer = receiver
                         from_peer, to_peer = None, None
                         if row[4]:
                             try:
@@ -484,43 +474,67 @@ class TelemetryDB:
                                 tp = d.get("to_peer")
                                 pid = d.get("peer_id")
                                 if fp and tp:
-                                    # New format: both set correctly
                                     from_peer, to_peer = fp, tp
                                 elif tp and pid and tp != pid:
-                                    # Old format: to_peer was actually the requester (sender)
                                     from_peer, to_peer = tp, pid
                             except Exception:
                                 pass
                         all_events.append((row[0], row[1], row[2], row[3], from_peer, to_peer))
-                        count += 1
-                    if count >= budget:
-                        break
+
+                if filtered:
+                    # Single query over full range with LIMIT
+                    sql = base_sql + f" ORDER BY timestamp_ns LIMIT {budget}"
+                    _collect_broadcast(self.conn.execute(sql, base_params))
+                else:
+                    # Bucketed sampling for unfiltered — gives even timeline coverage
+                    num_buckets = 50
+                    per_bucket = max(1, budget // num_buckets)
+                    bucket_ns = range_ns // num_buckets
+                    count = 0
+                    for b in range(num_buckets):
+                        bs = start_ns + b * bucket_ns
+                        be = bs + bucket_ns
+                        bp = list(base_params)
+                        bp[len(types)] = bs
+                        bp[len(types) + 1] = be
+                        sql = base_sql + f" ORDER BY timestamp_ns LIMIT {per_bucket}"
+                        before = len(all_events)
+                        _collect_broadcast(self.conn.execute(sql, bp))
+                        count += len(all_events) - before
+                        if count >= budget:
+                            break
                 continue
 
-            # Bucketed sampling (runs in background thread, not user-facing)
+            if filtered:
+                # Single query per event-type group over the full range (no bucketing).
+                # Result set is small when filtered, so this is much faster than 50 queries.
+                if contract_key:
+                    sql = (f"SELECT te.timestamp_ns, te.event_type, te.peer_id, te.tx_id "
+                           f"FROM tx_events te JOIN transactions t ON te.tx_id = t.tx_id "
+                           f"WHERE te.event_type IN ({ph}) AND te.timestamp_ns BETWEEN ? AND ? "
+                           f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT {budget}")
+                    params = list(types) + [start_ns, end_ns, contract_key]
+                else:  # peer_id
+                    sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
+                           f"FROM tx_events WHERE event_type IN ({ph}) "
+                           f"AND timestamp_ns BETWEEN ? AND ? AND peer_id = ? "
+                           f"ORDER BY timestamp_ns LIMIT {budget}")
+                    params = list(types) + [start_ns, end_ns, peer_id]
+                cur = self.conn.execute(sql, params)
+                for row in cur.fetchall():
+                    all_events.append((row[0], row[1], row[2], row[3], None, None))
+                continue
+
+            # Unfiltered: bucketed sampling for even timeline coverage
             num_buckets = 50
             per_bucket = max(1, budget // num_buckets)
             bucket_ns = range_ns // num_buckets
             count = 0
-
-            if contract_key:
-                bucket_sql = (f"SELECT te.timestamp_ns, te.event_type, te.peer_id, te.tx_id "
-                              f"FROM tx_events te JOIN transactions t ON te.tx_id = t.tx_id "
-                              f"WHERE te.event_type IN ({ph}) AND te.timestamp_ns BETWEEN ? AND ? "
-                              f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, contract_key, per_bucket]
-            elif peer_id:
-                bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
-                              f"FROM tx_events WHERE event_type IN ({ph}) "
-                              f"AND timestamp_ns BETWEEN ? AND ? AND peer_id = ? "
-                              f"ORDER BY timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, peer_id, per_bucket]
-            else:
-                bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
-                              f"FROM tx_events WHERE event_type IN ({ph}) "
-                              f"AND timestamp_ns BETWEEN ? AND ? "
-                              f"ORDER BY timestamp_ns LIMIT ?")
-                base_params = list(types) + [0, 0, per_bucket]
+            bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
+                          f"FROM tx_events WHERE event_type IN ({ph}) "
+                          f"AND timestamp_ns BETWEEN ? AND ? "
+                          f"ORDER BY timestamp_ns LIMIT ?")
+            base_params = list(types) + [0, 0, per_bucket]
 
             for b in range(num_buckets):
                 bs = start_ns + b * bucket_ns
