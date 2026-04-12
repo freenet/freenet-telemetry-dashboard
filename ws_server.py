@@ -2790,18 +2790,11 @@ async def main():
     # History cache is built by periodic_history_cache() background task.
     # First clients use the fallback (direct query) until cache is ready.
 
-    # Ensure DB indexes exist (may be slow for new indexes on large DBs)
-    # Run in background thread so server starts accepting connections immediately.
-    async def ensure_indexes_background():
-        def _create():
-            tmp = TelemetryDB(db.db_path)
-            tmp.open()
-            try:
-                tmp.ensure_indexes()
-                print("[index] All indexes verified", flush=True)
-            finally:
-                tmp.close()
-        await asyncio.to_thread(_create)
+    # Note: DB indexes are NOT created automatically at server startup.
+    # On a large DB (128GB+), CREATE INDEX acquires an exclusive write lock
+    # and can take 30+ minutes per new index, blocking live telemetry ingest.
+    # Run `python3 create_indexes.py` offline (while server is stopped) to
+    # add new indexes. See SCHEMA_INDEXES in telemetry_db.py for the list.
 
     # Start WebSocket server with compression enabled
     # permessage-deflate provides ~40x compression for JSON data
@@ -2820,7 +2813,6 @@ async def main():
             flush_event_buffer(),
             periodic_cleanup(),
             periodic_history_cache(),
-            ensure_indexes_background(),
         )
 
 
