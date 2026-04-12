@@ -2749,23 +2749,10 @@ async def load_initial_state():
     # Precompute performance metrics from DB
     precompute_metrics_from_db()
 
-    # Supplement contract subscriptions from DB — JSONL tail only captures
-    # a small window and may miss most contracts
-    db_contracts = db.get_active_contracts()
-    if db_contracts:
-        merged = 0
-        for ck, info in db_contracts.items():
-            if ck not in subscriptions:
-                subscriptions[ck] = {
-                    "subscribers": info["subscribers"],
-                    "tree": {},
-                }
-                merged += 1
-            else:
-                # Merge DB subscribers into existing set
-                subscriptions[ck]["subscribers"] |= info["subscribers"]
-        if merged > 0:
-            print(f"Merged {merged} additional contracts from DB ({len(db_contracts)} total in DB)", flush=True)
+    # Supplement contract subscriptions from DB — skipped on startup because
+    # the JOIN query on 128GB+ DB takes minutes on cold cache.
+    # Contracts populate from live events instead.
+    print("Skipping DB contract merge (slow on large DB, will populate from live events)", flush=True)
 
     print(f"Contract states: {len(contract_states)} contracts", flush=True)
     print(f"Subscriptions: {len(subscriptions)} contracts", flush=True)
