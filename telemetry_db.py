@@ -22,7 +22,7 @@ DEFAULT_DB_PATH = "/var/www/freenet-dashboard/telemetry.db"
 # Keep 7 days of data by default
 DEFAULT_RETENTION_NS = 7 * 24 * 60 * 60 * 1_000_000_000
 
-SCHEMA = """
+SCHEMA_TABLES = """
 -- Events: replaces event_history deque
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,8 +33,6 @@ CREATE TABLE IF NOT EXISTS events (
     contract_key TEXT,
     data TEXT NOT NULL  -- full event dict as JSON
 );
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp_ns);
-CREATE INDEX IF NOT EXISTS idx_events_tx ON events(tx_id) WHERE tx_id IS NOT NULL;
 
 -- Transactions: replaces transactions dict
 CREATE TABLE IF NOT EXISTS transactions (
@@ -48,8 +46,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     duration_ms REAL,
     event_count INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_tx_start ON transactions(start_ns);
-CREATE INDEX IF NOT EXISTS idx_tx_contract ON transactions(contract_key) WHERE contract_key IS NOT NULL;
 
 -- Transaction events: individual events within a transaction
 CREATE TABLE IF NOT EXISTS tx_events (
@@ -59,8 +55,6 @@ CREATE TABLE IF NOT EXISTS tx_events (
     event_type TEXT NOT NULL,
     peer_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id);
-CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns);
 
 -- Pre-computed flows: peer-to-peer message hops
 -- tx_id stored for contract filtering via JOIN
@@ -72,9 +66,6 @@ CREATE TABLE IF NOT EXISTS flows (
     event_type TEXT NOT NULL,
     tx_id TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns);
-CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns);
 
 -- Metadata for tracking ingest position
 CREATE TABLE IF NOT EXISTS meta (
@@ -82,6 +73,24 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 """
+
+# Indexes are created separately so they can be deferred on large DBs.
+# On a 128GB DB, CREATE INDEX IF NOT EXISTS still checks the full table
+# for new indexes, which can take minutes. We create them in a background
+# thread after the server is already accepting connections.
+SCHEMA_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_events_tx ON events(tx_id) WHERE tx_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_events_peer_ts ON events(peer_id, event_type, timestamp_ns) WHERE peer_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_tx_start ON transactions(start_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_tx_contract ON transactions(contract_key) WHERE contract_key IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id)",
+    "CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_txe_peer_ts ON tx_events(peer_id, event_type, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",
+]
 
 
 class TelemetryDB:
@@ -106,7 +115,19 @@ class TelemetryDB:
         self.conn.execute("PRAGMA cache_size=-64000")  # 64MB
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA temp_store=MEMORY")
-        self.conn.executescript(SCHEMA)
+        # Only create tables synchronously — indexes are deferred
+        self.conn.executescript(SCHEMA_TABLES)
+
+    def ensure_indexes(self):
+        """Create all indexes. Fast if they already exist, slow for new indexes
+        on large tables. Call from a background thread on large DBs."""
+        for stmt in SCHEMA_INDEXES:
+            idx_name = stmt.split("IF NOT EXISTS ")[1].split(" ON ")[0]
+            t0 = time.time()
+            self.conn.execute(stmt)
+            dt = time.time() - t0
+            if dt > 1.0:
+                print(f"[index] {idx_name} created in {dt:.1f}s", flush=True)
 
     def close(self):
         if self.conn:

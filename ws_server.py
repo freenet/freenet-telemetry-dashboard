@@ -2552,10 +2552,13 @@ async def handle_client(websocket):
         if _history_cache:
             await handler.send_direct(_history_cache)
         else:
-            # Fallback: cache not yet ready (shouldn't happen after startup)
-            history = get_history()
-            await handler.send_direct(json_encode(history))
-            del history
+            # Fallback: cache not yet ready — build in thread to avoid blocking
+            presence_snapshot = sorted(peer_presence.values(), key=lambda p: p["first_seen"])
+            cached = await asyncio.to_thread(
+                _build_history_in_thread, db.db_path, presence_snapshot
+            )
+            await handler.send_direct(cached)
+            del cached
 
         # Keep connection alive and handle messages
         async for message in websocket:
@@ -2619,14 +2622,21 @@ async def handle_client(websocket):
 
                 elif msg_type == "query_flows":
                     # Server-side event query for replay animation
+                    # Run in background thread to avoid blocking the event loop
                     start_ns = msg.get("start_ns")
                     end_ns = msg.get("end_ns")
                     contract = msg.get("contract")
                     peer = msg.get("peer_id")
                     if start_ns and end_ns:
-                        particles = db.get_events_for_range(
-                            int(start_ns), int(end_ns), contract, peer
-                        )
+                        _s, _e, _c, _p = int(start_ns), int(end_ns), contract, peer
+                        def _query_flows():
+                            tmp = TelemetryDB(db.db_path)
+                            tmp.open()
+                            try:
+                                return tmp.get_events_for_range(_s, _e, _c, _p)
+                            finally:
+                                tmp.close()
+                        particles = await asyncio.to_thread(_query_flows)
                         await handler.send_direct(json_encode({
                             "type": "flows_result",
                             "flows": particles,
@@ -2780,6 +2790,19 @@ async def main():
     # History cache is built by periodic_history_cache() background task.
     # First clients use the fallback (direct query) until cache is ready.
 
+    # Ensure DB indexes exist (may be slow for new indexes on large DBs)
+    # Run in background thread so server starts accepting connections immediately.
+    async def ensure_indexes_background():
+        def _create():
+            tmp = TelemetryDB(db.db_path)
+            tmp.open()
+            try:
+                tmp.ensure_indexes()
+                print("[index] All indexes verified", flush=True)
+            finally:
+                tmp.close()
+        await asyncio.to_thread(_create)
+
     # Start WebSocket server with compression enabled
     # permessage-deflate provides ~40x compression for JSON data
     print(f"Starting WebSocket server on port {WS_PORT}...")
@@ -2797,6 +2820,7 @@ async def main():
             flush_event_buffer(),
             periodic_cleanup(),
             periodic_history_cache(),
+            ensure_indexes_background(),
         )
 
 
