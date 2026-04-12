@@ -300,27 +300,41 @@ class TelemetryDB:
             )
             return [orjson.loads(row[0]) for row in cur.fetchall()]
 
-        # Time-bucketed sampling: divide the time range into 100 buckets,
-        # fetch `per_bucket` events from each using the timestamp index.
-        # This avoids the full table scan of the old `id % step` approach.
-        num_buckets = 100
-        per_bucket = max(1, limit // num_buckets)
+        # Time-grid seek sampling (two-phase for the large events table):
+        # Phase 1: for each of `limit` evenly-spaced target timestamps, index-seek
+        # to the nearest event and collect rowids (index-only scan, no data column).
+        # Phase 2: batch-fetch full rows by sorted primary key for sequential I/O.
+        # Previous bucketing (LIMIT N per bucket) clustered events at bucket starts.
         range_ns = end_ns - start_ns
-        bucket_ns = range_ns // num_buckets
+        step_ns = max(1, range_ns // limit)
+        rowids = []
+        seen = set()
+        for i in range(limit):
+            target_ns = start_ns + i * step_ns + step_ns // 2
+            row = self.conn.execute(
+                "SELECT id FROM events WHERE timestamp_ns >= ? "
+                "ORDER BY timestamp_ns LIMIT 1",
+                (target_ns,),
+            ).fetchone()
+            if row and row[0] not in seen:
+                rowids.append(row[0])
+                seen.add(row[0])
+
+        if not rowids:
+            return []
+
+        rowids.sort()
         results = []
-        for i in range(num_buckets):
-            bucket_start = start_ns + i * bucket_ns
-            bucket_end = bucket_start + bucket_ns
+        for i in range(0, len(rowids), 500):
+            chunk = rowids[i:i + 500]
+            ph = ",".join("?" * len(chunk))
             cur = self.conn.execute(
-                "SELECT data FROM events WHERE timestamp_ns >= ? AND timestamp_ns < ? "
-                "ORDER BY timestamp_ns LIMIT ?",
-                (bucket_start, bucket_end, per_bucket),
+                f"SELECT data FROM events WHERE id IN ({ph}) ORDER BY timestamp_ns",
+                chunk,
             )
             for row in cur.fetchall():
                 results.append(orjson.loads(row[0]))
-            if len(results) >= limit:
-                break
-        return results[:limit]
+        return results
 
     def get_time_range(self):
         """Get (min_timestamp, max_timestamp) from events table.
@@ -496,23 +510,25 @@ class TelemetryDB:
                     for row in rows:
                         _append_broadcast_row(row)
                 else:
-                    # Bucketed sampling for unfiltered — gives even timeline coverage
-                    num_buckets = 50
-                    per_bucket = max(1, budget // num_buckets)
-                    bucket_ns = range_ns // num_buckets
-                    count = 0
-                    for b in range(num_buckets):
-                        bs = start_ns + b * bucket_ns
-                        be = bs + bucket_ns
-                        bp = list(base_params)
-                        bp[len(types)] = bs
-                        bp[len(types) + 1] = be
-                        sql = base_sql + f" ORDER BY timestamp_ns LIMIT {per_bucket}"
-                        before = len(all_events)
-                        _collect_broadcast(self.conn.execute(sql, bp))
-                        count += len(all_events) - before
-                        if count >= budget:
-                            break
+                    # Time-grid seek sampling: one index-seek per target timestamp.
+                    # Gives truly uniform distribution (no bucket-start clustering).
+                    seek_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id, data "
+                                f"FROM events WHERE event_type IN ({ph}) "
+                                f"AND timestamp_ns >= ? ORDER BY timestamp_ns LIMIT 1")
+                    step_ns = max(1, range_ns // budget)
+                    seen_keys = set()
+                    for i in range(budget):
+                        target = start_ns + i * step_ns + step_ns // 2
+                        row = self.conn.execute(
+                            seek_sql, (*types, target)
+                        ).fetchone()
+                        if not row or row[0] > end_ns:
+                            continue
+                        key = (row[0], row[2])
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        _append_broadcast_row(row)
                 continue
 
             if filtered:
@@ -544,29 +560,23 @@ class TelemetryDB:
                     all_events.append((row[0], row[1], row[2], row[3], None, None))
                 continue
 
-            # Unfiltered: bucketed sampling for even timeline coverage
-            num_buckets = 50
-            per_bucket = max(1, budget // num_buckets)
-            bucket_ns = range_ns // num_buckets
-            count = 0
-            bucket_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
-                          f"FROM tx_events WHERE event_type IN ({ph}) "
-                          f"AND timestamp_ns BETWEEN ? AND ? "
-                          f"ORDER BY timestamp_ns LIMIT ?")
-            base_params = list(types) + [0, 0, per_bucket]
-
-            for b in range(num_buckets):
-                bs = start_ns + b * bucket_ns
-                be = bs + bucket_ns
-                bp = list(base_params)
-                bp[len(types)] = bs
-                bp[len(types) + 1] = be
-                cur = self.conn.execute(bucket_sql, bp)
-                for row in cur.fetchall():
-                    all_events.append((row[0], row[1], row[2], row[3], None, None))
-                    count += 1
-                if count >= budget:
-                    break
+            # Unfiltered: time-grid seek sampling for uniform distribution.
+            # One index-seek per target timestamp using idx_txe_type_ts.
+            seek_sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
+                        f"FROM tx_events WHERE event_type IN ({ph}) "
+                        f"AND timestamp_ns >= ? ORDER BY timestamp_ns LIMIT 1")
+            step_ns = max(1, range_ns // budget)
+            seen_keys = set()
+            for i in range(budget):
+                target = start_ns + i * step_ns + step_ns // 2
+                row = self.conn.execute(seek_sql, (*types, target)).fetchone()
+                if not row or row[0] > end_ns:
+                    continue
+                key = (row[0], row[2])
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                all_events.append((row[0], row[1], row[2], row[3], None, None))
 
         if not all_events:
             return []
