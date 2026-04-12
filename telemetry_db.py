@@ -464,27 +464,37 @@ class TelemetryDB:
                     base_sql += " AND peer_id = ?"
                     base_params.append(peer_id)
 
+                def _append_broadcast_row(row):
+                    from_peer, to_peer = None, None
+                    if row[4]:
+                        try:
+                            d = orjson.loads(row[4])
+                            fp = d.get("from_peer")
+                            tp = d.get("to_peer")
+                            pid = d.get("peer_id")
+                            if fp and tp:
+                                from_peer, to_peer = fp, tp
+                            elif tp and pid and tp != pid:
+                                from_peer, to_peer = tp, pid
+                        except Exception:
+                            pass
+                    all_events.append((row[0], row[1], row[2], row[3], from_peer, to_peer))
+
                 def _collect_broadcast(cur):
                     for row in cur.fetchall():
-                        from_peer, to_peer = None, None
-                        if row[4]:
-                            try:
-                                d = orjson.loads(row[4])
-                                fp = d.get("from_peer")
-                                tp = d.get("to_peer")
-                                pid = d.get("peer_id")
-                                if fp and tp:
-                                    from_peer, to_peer = fp, tp
-                                elif tp and pid and tp != pid:
-                                    from_peer, to_peer = tp, pid
-                            except Exception:
-                                pass
-                        all_events.append((row[0], row[1], row[2], row[3], from_peer, to_peer))
+                        _append_broadcast_row(row)
 
                 if filtered:
-                    # Single query over full range with LIMIT
-                    sql = base_sql + f" ORDER BY timestamp_ns LIMIT {budget}"
-                    _collect_broadcast(self.conn.execute(sql, base_params))
+                    # Fetch up to 4x budget then sample uniformly across time
+                    # so particles span the full range instead of clustering.
+                    hard_cap = budget * 4
+                    sql = base_sql + f" ORDER BY timestamp_ns LIMIT {hard_cap}"
+                    rows = self.conn.execute(sql, base_params).fetchall()
+                    if len(rows) > budget:
+                        step = len(rows) / budget
+                        rows = [rows[int(i * step)] for i in range(budget)]
+                    for row in rows:
+                        _append_broadcast_row(row)
                 else:
                     # Bucketed sampling for unfiltered — gives even timeline coverage
                     num_buckets = 50
@@ -506,22 +516,31 @@ class TelemetryDB:
                 continue
 
             if filtered:
-                # Single query per event-type group over the full range (no bucketing).
-                # Result set is small when filtered, so this is much faster than 50 queries.
+                # Single query per event-type group over the full range.
+                # Fetch with a hard cap (4x budget) then sample uniformly across
+                # time so particles are distributed across the timeline instead
+                # of clustering at the start. The indexes make the full fetch
+                # cheap even when we don't need all of it.
+                hard_cap = budget * 4
                 if contract_key:
                     sql = (f"SELECT te.timestamp_ns, te.event_type, te.peer_id, te.tx_id "
                            f"FROM tx_events te JOIN transactions t ON te.tx_id = t.tx_id "
                            f"WHERE te.event_type IN ({ph}) AND te.timestamp_ns BETWEEN ? AND ? "
-                           f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT {budget}")
+                           f"AND t.contract_key = ? ORDER BY te.timestamp_ns LIMIT {hard_cap}")
                     params = list(types) + [start_ns, end_ns, contract_key]
                 else:  # peer_id
                     sql = (f"SELECT timestamp_ns, event_type, peer_id, tx_id "
                            f"FROM tx_events WHERE event_type IN ({ph}) "
                            f"AND timestamp_ns BETWEEN ? AND ? AND peer_id = ? "
-                           f"ORDER BY timestamp_ns LIMIT {budget}")
+                           f"ORDER BY timestamp_ns LIMIT {hard_cap}")
                     params = list(types) + [start_ns, end_ns, peer_id]
-                cur = self.conn.execute(sql, params)
-                for row in cur.fetchall():
+                rows = self.conn.execute(sql, params).fetchall()
+                # Uniform sample: if we got more than budget rows, pick every
+                # Nth row so the remaining events span the full time range.
+                if len(rows) > budget:
+                    step = len(rows) / budget
+                    rows = [rows[int(i * step)] for i in range(budget)]
+                for row in rows:
                     all_events.append((row[0], row[1], row[2], row[3], None, None))
                 continue
 
