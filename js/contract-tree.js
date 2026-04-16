@@ -86,8 +86,10 @@ export function buildTree(contractKey, peers, connections) {
                 }
             }
         }
-    } else if (Object.keys(broadcastTree).length > 0) {
-        // Fallback 1: use broadcast tree (only live peers)
+    }
+
+    // Fall through to broadcast tree if peer_states produced no nodes
+    if (allNodes.size === 0 && Object.keys(broadcastTree).length > 0) {
         for (const [fromId, toIds] of Object.entries(broadcastTree)) {
             const parentId = peerIdToAnonId.get(fromId);
             if (!parentId) continue;
@@ -107,9 +109,10 @@ export function buildTree(contractKey, peers, connections) {
                 }
             }
         }
-    } else {
-        // Fallback 2: use subscribers list (anonymized IPs = topology peer IDs)
-        // plus contractStates peer_ids, and infer tree from network connections
+    }
+
+    // Fall through to subscribers/contractStates if still no nodes
+    if (allNodes.size === 0) {
         const subscribers = subData.subscribers || [];
         for (const subId of subscribers) {
             if (peers.has(subId)) {
