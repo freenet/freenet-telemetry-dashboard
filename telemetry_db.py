@@ -19,8 +19,10 @@ import orjson
 # Default DB path alongside ws_server.py
 DEFAULT_DB_PATH = "/var/www/freenet-dashboard/telemetry.db"
 
-# Keep 7 days of data by default
-DEFAULT_RETENTION_NS = 7 * 24 * 60 * 60 * 1_000_000_000
+# Keep 48 hours of data by default. The telemetry firehose is ~46 GB/day, so a
+# 7-day window grew the DB past 300 GB and filled the root disk (2026-05-22).
+# 48h keeps a full day of lookback with margin; tune this constant to taste.
+DEFAULT_RETENTION_NS = 48 * 60 * 60 * 1_000_000_000
 
 SCHEMA_TABLES = """
 -- Events: replaces event_history deque
@@ -111,6 +113,10 @@ class TelemetryDB:
             isolation_level=None,  # autocommit; we manage transactions manually
         )
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # Cap the WAL file: without a size limit the WAL never shrinks once it
+        # balloons. A runaway WAL grew a 329 GB husk and filled the disk
+        # (2026-05-22). 512 MB is truncated back after each checkpoint.
+        self.conn.execute("PRAGMA journal_size_limit=536870912")  # 512 MB
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-64000")  # 64MB
         self.conn.execute("PRAGMA busy_timeout=5000")
@@ -869,6 +875,9 @@ class TelemetryDB:
             )
             self.conn.execute("DELETE FROM transactions WHERE start_ns < ?", (cutoff,))
             self.conn.execute("COMMIT")
+            # Checkpoint and truncate the WAL so the pages freed by the DELETEs
+            # above are reclaimed and the WAL file cannot grow without bound.
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as e:
             try:
                 self.conn.execute("ROLLBACK")
