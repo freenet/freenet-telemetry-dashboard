@@ -2704,7 +2704,16 @@ async def load_initial_state():
             f.seek(resume_offset)
             f.readline()  # skip partial line
 
-        for line in f:
+        # Bound the catch-up read to the file size captured at startup so we
+        # don't chase appends to this live log forever — the tailer handles
+        # everything after. A while/readline loop (not `for line in f`) is
+        # required so f.tell() stays usable: tell() raises inside text-file
+        # iteration. 2026-05-22: resuming into a high-volume live log hung
+        # startup indefinitely here.
+        while f.tell() < file_size:
+            line = f.readline()
+            if not line:
+                break
             if not line.strip():
                 continue
             try:
