@@ -1689,6 +1689,18 @@ def process_record(record, store_history=True):
                         # restarted peer hasn't emitted a connect_connected
                         # yet, and its old count is no longer authoritative.
                         peers[ip]["claimed_count"] = None
+                        # Also drop the stale neighbor set and any global
+                        # edges keyed by this IP — without this, a restarted
+                        # peer briefly shows the union of its pre-restart
+                        # and post-restart neighbors (the new pruning falls
+                        # through to "keep all" when claimed_count is None).
+                        old_neighbors = peers[ip].get("connections", set())
+                        peers[ip]["connections"] = set()
+                        for other_ip in old_neighbors:
+                            stale_edge = frozenset({ip, other_ip})
+                            connections.pop(stale_edge, None)
+                            if other_ip in peers:
+                                peers[other_ip]["connections"].discard(ip)
                     peers[ip]["peer_id"] = peer_id
                     ip_to_peer_id[ip] = peer_id
                     peer_id_to_ip[peer_id] = ip
@@ -1764,6 +1776,13 @@ def process_record(record, store_history=True):
                         # The other side won't emit a disconnect event if it
                         # crashed silently — this is the only path that heals
                         # claimed_count from the surviving side.
+                        #
+                        # Correctness depends on connect_connected being emitted
+                        # for every new edge (both sides emit on a successful
+                        # CONNECT), so a fresh edge's establishment always
+                        # produces a claimed_count that includes that edge.
+                        # The decrement is then symmetric: every edge added by
+                        # an event-update is removed by the matching disconnect.
                         cc = peers[reporter_ip].get("claimed_count")
                         if isinstance(cc, int) and cc > 0:
                             peers[reporter_ip]["claimed_count"] = cc - 1
