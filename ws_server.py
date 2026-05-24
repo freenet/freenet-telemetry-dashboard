@@ -1685,6 +1685,10 @@ def process_record(record, store_history=True):
                         cleanup_stale_peer_id(old_peer_id)
                         # Remove old reverse mapping
                         peer_id_to_ip.pop(old_peer_id, None)
+                        # Reset the self-reported connection_count: the
+                        # restarted peer hasn't emitted a connect_connected
+                        # yet, and its old count is no longer authoritative.
+                        peers[ip]["claimed_count"] = None
                     peers[ip]["peer_id"] = peer_id
                     ip_to_peer_id[ip] = peer_id
                     peer_id_to_ip[peer_id] = ip
@@ -1710,18 +1714,28 @@ def process_record(record, store_history=True):
         # this in the topology assembly to prune stale accumulated connections
         # without needing every disconnect event to land (peers crash, telemetry
         # is best-effort).
+        # bool is a subclass of int in Python; exclude it explicitly so a
+        # buggy/garbage payload like {"connection_count": true} can't pass.
         if event_type == "connect_connected" and this_ip in peers:
             cc = body.get("connection_count")
-            if isinstance(cc, int) and cc >= 0:
+            if isinstance(cc, int) and not isinstance(cc, bool) and cc >= 0:
                 peers[this_ip]["claimed_count"] = cc
         if is_public_ip(this_ip) and is_public_ip(other_ip):
             conn = frozenset({this_ip, other_ip})
-            if conn not in connections:
-                connections[conn] = timestamp
-                if this_ip in peers:
-                    peers[this_ip]["connections"].add(other_ip)
-                if other_ip in peers:
-                    peers[other_ip]["connections"].add(this_ip)
+            # Always refresh the edge timestamp on observation, not just on
+            # first sight.  The topology assembly sorts by this timestamp and
+            # keeps the N most-recent edges per peer; without this refresh, a
+            # long-lived edge first observed hours ago would sort to the bottom
+            # and could be evicted in favour of a more recent stale edge.
+            is_new_edge = conn not in connections
+            connections[conn] = timestamp
+            if this_ip in peers:
+                peers[this_ip]["connections"].add(other_ip)
+            if other_ip in peers:
+                peers[other_ip]["connections"].add(this_ip)
+            if is_new_edge:
+                # connection_added is broadcast metadata: only emit on the
+                # first sight of an edge, not on every refresh.
                 connection_added = (anonymize_ip(this_ip), anonymize_ip(other_ip))
 
     # Handle disconnect events - remove connection from tracking
@@ -1743,6 +1757,16 @@ def process_record(record, store_history=True):
                     connections.pop(conn, None)
                     if reporter_ip in peers:
                         peers[reporter_ip]["connections"].discard(disconnected_ip)
+                        # Decrement reporter's claimed_count so the topology
+                        # assembly's pruning sees its actual current degree
+                        # without waiting for the next connect_connected (which
+                        # may not arrive if the peer's topology is steady).
+                        # The other side won't emit a disconnect event if it
+                        # crashed silently — this is the only path that heals
+                        # claimed_count from the surviving side.
+                        cc = peers[reporter_ip].get("claimed_count")
+                        if isinstance(cc, int) and cc > 0:
+                            peers[reporter_ip]["claimed_count"] = cc - 1
                     if disconnected_ip in peers:
                         peers[disconnected_ip]["connections"].discard(reporter_ip)
                     connection_removed = (anonymize_ip(reporter_ip), anonymize_ip(disconnected_ip))
@@ -2107,7 +2131,7 @@ def get_network_state():
             edge_key = frozenset({ip, other})
             if edge_key in seen_edges:
                 continue
-            if ip in peer_keep.get(other, ()):
+            if ip in peer_keep.get(other, set()):
                 seen_edges.add(edge_key)
                 conn_list.append([anonymize_ip(ip), anonymize_ip(other)])
 
