@@ -1688,19 +1688,21 @@ def process_record(record, store_history=True):
                         # Reset the self-reported connection_count: the
                         # restarted peer hasn't emitted a connect_connected
                         # yet, and its old count is no longer authoritative.
+                        # We deliberately do NOT wipe peers[ip]['connections']
+                        # or remove edges keyed by this IP from the global
+                        # connections dict here.  Doing so seemed correct in
+                        # the abstract (close the brief "stale union of pre/
+                        # post-restart neighbors" window), but in practice
+                        # the dashboard's startup JSONL replay processes
+                        # months of events in seconds, hitting every
+                        # historical peer_id change back-to-back — and the
+                        # wipe nuked nearly all accumulated topology.  The
+                        # next live connect_connected event from the
+                        # restarted peer will establish its real edges, and
+                        # mutual-vouch pruning will then drop stale edges
+                        # from any neighbor whose own claimed_count no
+                        # longer includes this peer.
                         peers[ip]["claimed_count"] = None
-                        # Also drop the stale neighbor set and any global
-                        # edges keyed by this IP — without this, a restarted
-                        # peer briefly shows the union of its pre-restart
-                        # and post-restart neighbors (the new pruning falls
-                        # through to "keep all" when claimed_count is None).
-                        old_neighbors = peers[ip].get("connections", set())
-                        peers[ip]["connections"] = set()
-                        for other_ip in old_neighbors:
-                            stale_edge = frozenset({ip, other_ip})
-                            connections.pop(stale_edge, None)
-                            if other_ip in peers:
-                                peers[other_ip]["connections"].discard(ip)
                     peers[ip]["peer_id"] = peer_id
                     ip_to_peer_id[ip] = peer_id
                     peer_id_to_ip[peer_id] = ip
