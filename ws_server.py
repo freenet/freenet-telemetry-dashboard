@@ -1664,6 +1664,10 @@ def process_record(record, store_history=True):
                     "last_seen": timestamp,
                     "connections": set(),
                     "peer_id": peer_id,  # Store telemetry peer_id for contract_states matching
+                    # Peer's self-reported current connection_count, captured from
+                    # connect_connected events. Used to prune stale accumulated
+                    # connections (see topology assembly below).
+                    "claimed_count": None,
                 }
                 updated_peers.append(ip)
                 # Track IP <-> peer_id mappings
@@ -1702,6 +1706,14 @@ def process_record(record, store_history=True):
     connection_added = None
     connection_removed = None
     if event_type in ("connect", "connected", "connect_connected") and this_ip and other_ip:
+        # Capture the reporter's self-reported current connection_count.  We use
+        # this in the topology assembly to prune stale accumulated connections
+        # without needing every disconnect event to land (peers crash, telemetry
+        # is best-effort).
+        if event_type == "connect_connected" and this_ip in peers:
+            cc = body.get("connection_count")
+            if isinstance(cc, int) and cc >= 0:
+                peers[this_ip]["claimed_count"] = cc
         if is_public_ip(this_ip) and is_public_ip(other_ip):
             conn = frozenset({this_ip, other_ip})
             if conn not in connections:
@@ -2047,25 +2059,57 @@ def get_network_state():
                     "is_gateway": is_gateway,  # Gateway flag from lifecycle data
                 })
 
-    # Only include connections between active peers, capped per peer.
-    # Peers have max_connections=20 by default, but disconnect events are often
-    # missed so stale connections accumulate.  Cap each peer to MAX_CONN_PER_PEER
-    # to keep the display realistic.
-    MAX_CONN_PER_PEER = 20
-    conn_list = []
-    conn_count_per_peer = {}  # anon_id -> count
-    for conn in connections:
+    # Only include connections between active peers, with stale connections
+    # pruned using each peer's self-reported current connection_count.
+    #
+    # Background: every connect_connected event carries a `connection_count`
+    # field — the reporter's actual current connection count at that moment.
+    # We capture it as peers[ip]["claimed_count"] in the event handler.  Here
+    # we use it as authoritative: for each peer, keep only the N most-recent
+    # connections where N is its latest claimed_count, and emit an edge only
+    # if both sides include it.  This corrects for the well-known telemetry
+    # gap where peer crashes don't produce visible disconnect events, so
+    # stale connections accumulate in our `connections` dict.  Replaces the
+    # earlier hardcoded MAX_CONN_PER_PEER=20 cap that masked the bug.
+
+    # Build per-peer connection list with timestamps from the global table.
+    peer_recent_conns = {}  # ip -> list of (other_ip, edge_timestamp)
+    for conn, edge_ts in connections.items():
         ips = list(conn)
-        if len(ips) == 2 and ips[0] in active_peer_ips and ips[1] in active_peer_ips:
-            a1 = anonymize_ip(ips[0])
-            a2 = anonymize_ip(ips[1])
-            c1 = conn_count_per_peer.get(a1, 0)
-            c2 = conn_count_per_peer.get(a2, 0)
-            if c1 >= MAX_CONN_PER_PEER or c2 >= MAX_CONN_PER_PEER:
-                continue  # skip — one side already at cap
-            conn_count_per_peer[a1] = c1 + 1
-            conn_count_per_peer[a2] = c2 + 1
-            conn_list.append([a1, a2])
+        if len(ips) != 2:
+            continue
+        a, b = ips
+        if a not in active_peer_ips or b not in active_peer_ips:
+            continue
+        peer_recent_conns.setdefault(a, []).append((b, edge_ts))
+        peer_recent_conns.setdefault(b, []).append((a, edge_ts))
+
+    # For each peer, keep only the `claimed_count` most-recent edges.  If we
+    # have no claimed count yet (peer not in peers map, or never reported a
+    # connection_count), keep all of its accumulated edges — no worse than
+    # the pre-fix behaviour for that peer.
+    peer_keep = {}  # ip -> set(other_ip) the peer "vouches for"
+    for ip, edges in peer_recent_conns.items():
+        claimed = (peers.get(ip) or {}).get("claimed_count")
+        edges.sort(key=lambda x: x[1], reverse=True)
+        if isinstance(claimed, int) and claimed >= 0:
+            edges = edges[:claimed]
+        peer_keep[ip] = {other for other, _ in edges}
+
+    # Emit an edge iff both endpoints vouch for it.  This is what removes
+    # stale connections: when peer A crashes silently, peer B's next
+    # connect_connected event reports its new (lower) connection_count, B's
+    # top-N no longer includes A, so the (A,B) edge gets dropped here.
+    seen_edges = set()
+    conn_list = []
+    for ip, others in peer_keep.items():
+        for other in others:
+            edge_key = frozenset({ip, other})
+            if edge_key in seen_edges:
+                continue
+            if ip in peer_keep.get(other, ()):
+                seen_edges.add(edge_key)
+                conn_list.append([anonymize_ip(ip), anonymize_ip(other)])
 
     # Aggregate version stats (using active_lifecycle defined earlier)
     version_counts = {}
