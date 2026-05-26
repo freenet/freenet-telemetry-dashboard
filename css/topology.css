@@ -20,7 +20,7 @@
             font-family: var(--font-mono);
             font-size: 0.6em;
             color: var(--text-muted);
-            margin-bottom: 8px;
+            margin-bottom: 18px; /* clear vertical room above the 0.00 ring tick */
             flex-wrap: wrap;
         }
 

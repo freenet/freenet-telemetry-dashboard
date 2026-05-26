@@ -919,17 +919,17 @@ function getOrCreateStaticSvg() {
         svg.appendChild(inner);
     });
 
-    // Location markers
+    // Ring location ticks (0.00 / 0.25 / 0.50 / 0.75)
     [0, 0.25, 0.5, 0.75].forEach(loc => {
         const angle = loc * 2 * Math.PI - Math.PI / 2;
-        const x = CENTER + (RADIUS + 25) * Math.cos(angle);
-        const y = CENTER + (RADIUS + 25) * Math.sin(angle);
+        const x = CENTER + (RADIUS + 18) * Math.cos(angle);
+        const y = CENTER + (RADIUS + 18) * Math.sin(angle);
 
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         text.setAttribute('x', x);
         text.setAttribute('y', y);
         text.setAttribute('fill', '#484f58');
-        text.setAttribute('font-size', '12');
+        text.setAttribute('font-size', '9');
         text.setAttribute('font-family', 'IBM Plex Mono, monospace');
         text.setAttribute('text-anchor', 'middle');
         text.setAttribute('dominant-baseline', 'middle');
