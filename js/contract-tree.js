@@ -679,7 +679,7 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
     // Pass 4b: Render labels with collision avoidance
     const fontSize = NODE_RADIUS >= 6 ? 9 : 7;
     ctx.save();
-    ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
+    ctx.font = `${fontSize}px "IBM Plex Mono", monospace`;
 
     // Sort by priority descending so important labels get placed first
     labelCandidates.sort((a, b) => b.priority - a.priority);
@@ -743,7 +743,7 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
             ctx.setLineDash([]);
 
             // "disconnected" label
-            ctx.font = '8px "JetBrains Mono", monospace';
+            ctx.font = '8px "IBM Plex Mono", monospace';
             ctx.fillStyle = 'rgba(220, 50, 47, 0.6)';
             ctx.textAlign = 'center';
             ctx.fillText('disconnected', (minX + maxX) / 2, minY - pad - 4);
@@ -803,7 +803,7 @@ function getOrCreateTreeTooltip(container) {
         pointer-events: none;
         background: rgba(13, 17, 23, 0.95);
         color: #e6edf3;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: 'IBM Plex Mono', monospace;
         font-size: 11px;
         padding: 6px 10px;
         border-radius: 6px;
@@ -960,7 +960,7 @@ export function updateContractTree(container, peers, connections, subscriberPeer
         const ctx = canvas.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, displayWidth, minHeight);
-        ctx.font = '14px "Space Grotesk", sans-serif';
+        ctx.font = '14px "IBM Plex Sans", sans-serif';
         ctx.fillStyle = 'rgba(230, 237, 243, 0.5)';
         ctx.textAlign = 'center';
         ctx.fillText('No subscription tree data for this contract', displayWidth / 2, minHeight / 2);

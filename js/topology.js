@@ -930,7 +930,7 @@ function getOrCreateStaticSvg() {
         text.setAttribute('y', y);
         text.setAttribute('fill', '#484f58');
         text.setAttribute('font-size', '12');
-        text.setAttribute('font-family', 'JetBrains Mono, monospace');
+        text.setAttribute('font-family', 'IBM Plex Mono, monospace');
         text.setAttribute('text-anchor', 'middle');
         text.setAttribute('dominant-baseline', 'middle');
         text.textContent = loc.toFixed(2);
@@ -1207,7 +1207,7 @@ function getOrCreateTooltip(container) {
         pointer-events: none;
         background: ${tc.tooltipBg};
         color: ${tc.tooltipText};
-        font-family: 'JetBrains Mono', monospace;
+        font-family: 'IBM Plex Mono', monospace;
         font-size: 11px;
         padding: 6px 10px;
         border-radius: 6px;
@@ -1786,7 +1786,7 @@ function drawSelectedTransactionArrows(ctx, peers) {
 /** Draw a labeled pill for an event type at position (mx, my). */
 function drawEventLabel(ctx, mx, my, eventType, color) {
     const label = eventType.replace(/_/g, ' ');
-    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.font = '9px "IBM Plex Mono", monospace';
     const metrics = ctx.measureText(label);
     const padX = 5, padY = 3;
     const boxW = metrics.width + padX * 2;
@@ -2186,8 +2186,8 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
         ctx.translate(lx, ly);
         ctx.rotate(rotation);
         ctx.font = (lbl.isGateway || lbl.isYou || lbl.isPeerSelected)
-            ? 'bold 10px "JetBrains Mono", monospace'
-            : '500 9px "JetBrains Mono", monospace';
+            ? 'bold 10px "IBM Plex Mono", monospace'
+            : '500 9px "IBM Plex Mono", monospace';
         ctx.fillStyle = lbl.fillColor;
         ctx.globalAlpha = lbl.isConnected ? 0.8 : 1;
         ctx.textAlign = onLeft ? 'end' : 'start';
@@ -2290,7 +2290,7 @@ function drawCenterStats(svg, peers, subscriberPeerIds) {
     countText.setAttribute('y', CENTER - 8);
     countText.setAttribute('fill', state.selectedContract && visibleSubscribers === 0 ? '#484f58' : '#00d4aa');
     countText.setAttribute('font-size', '36');
-    countText.setAttribute('font-family', 'JetBrains Mono, monospace');
+    countText.setAttribute('font-family', 'IBM Plex Mono, monospace');
     countText.setAttribute('font-weight', '300');
     countText.setAttribute('text-anchor', 'middle');
     countText.textContent = displayCount;
@@ -2301,7 +2301,7 @@ function drawCenterStats(svg, peers, subscriberPeerIds) {
     labelText.setAttribute('y', CENTER + 18);
     labelText.setAttribute('fill', '#484f58');
     labelText.setAttribute('font-size', '11');
-    labelText.setAttribute('font-family', 'JetBrains Mono, monospace');
+    labelText.setAttribute('font-family', 'IBM Plex Mono, monospace');
     labelText.setAttribute('text-anchor', 'middle');
     labelText.textContent = displayLabel;
     centerGroup.appendChild(labelText);
@@ -2498,7 +2498,7 @@ function renderDistChart(connectionDistances) {
         ctx.setLineDash([]);
 
         // Median label
-        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.font = '9px "IBM Plex Mono", monospace';
         ctx.fillStyle = tc.labelText;
         ctx.textAlign = 'right';
         ctx.textBaseline = 'bottom';
@@ -2508,7 +2508,7 @@ function renderDistChart(connectionDistances) {
     // Axis labels when zoomed
     if (distChartZoomed) {
         const tc = themeColors();
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "IBM Plex Mono", monospace';
         ctx.fillStyle = tc.labelText;
 
         // Bottom-left: min distance

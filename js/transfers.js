@@ -215,7 +215,7 @@ export function renderTransferChart() {
         ctx.setLineDash([]);
 
         // Median label
-        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.font = '9px "IBM Plex Mono", monospace';
         ctx.fillStyle = cc.labelText;
         ctx.textAlign = 'right';
         ctx.textBaseline = 'bottom';
@@ -225,7 +225,7 @@ export function renderTransferChart() {
     // Axis labels when zoomed
     if (isZoomed) {
         const cc = chartColors();
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "IBM Plex Mono", monospace';
         ctx.fillStyle = cc.labelText;
 
         // Bottom-left: min speed

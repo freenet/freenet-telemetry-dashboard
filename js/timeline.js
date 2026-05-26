@@ -414,7 +414,7 @@ function drawReplayHighlight(ctx, width, height, tNow, totalDurationNs) {
     // PAUSED label in the selection region
     if (state.replayPaused) {
         const centerX = (left + right) / 2;
-        ctx.font = 'bold 11px "JetBrains Mono", monospace';
+        ctx.font = 'bold 11px "IBM Plex Mono", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle = isLight ? 'rgba(0, 127, 255, 0.8)' : 'rgba(0, 180, 255, 0.8)';
