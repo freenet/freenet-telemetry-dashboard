@@ -45,32 +45,38 @@
         .theme-toggle {
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 20px;
-            padding: 6px 12px;
-            font-size: 1em;
+            border-radius: 6px;
+            padding: 6px 10px;
             cursor: pointer;
-            backdrop-filter: blur(10px);
-            line-height: 1;
-            transition: border-color 0.2s, background 0.2s;
+            backdrop-filter: blur(5px);
+            line-height: 0;
+            color: var(--text-secondary);
+            transition: border-color 0.2s, background 0.2s, color 0.2s;
         }
 
         .theme-toggle:hover {
             border-color: var(--accent-primary);
             background: var(--bg-tertiary);
+            color: var(--text-primary);
         }
+
+        .theme-toggle-icon { display: none; }
+        .theme-icon-sun   { display: inline-block; } /* dark theme: show sun (click → light) */
+        [data-theme="light"] .theme-icon-sun  { display: none; }
+        [data-theme="light"] .theme-icon-moon { display: inline-block; }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            padding: 6px 16px;
+            padding: 6px 12px;
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 20px;
+            border-radius: 6px;
             font-family: var(--font-mono);
             font-size: 0.8em;
             font-weight: 500;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(5px);
         }
 
         .status-dot {
@@ -88,7 +94,7 @@
 
         .status-dot.historical {
             background: var(--color-put);
-            box-shadow: 0 0 12px rgba(251, 191, 36, 0.4);
+            box-shadow: 0 0 12px rgba(181, 137, 0, 0.45);
         }
 
         .status-dot.disconnected {
@@ -115,10 +121,10 @@
         .stat {
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 10px;
+            border-radius: 6px;
             padding: 8px;
             text-align: center;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(5px);
             transition: all 0.3s ease;
             position: relative;
             overflow: hidden;
@@ -158,7 +164,7 @@
             font-size: 0.7em;
             font-weight: 500;
             color: var(--text-secondary);
-            letter-spacing: 0.1em;
+            letter-spacing: 0.04em;
             margin-top: 4px;
         }
 
@@ -186,9 +192,9 @@
         .op-stat {
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 10px;
+            border-radius: 6px;
             padding: 10px 12px;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(5px);
             display: flex;
             align-items: center;
             gap: 10px;
@@ -205,10 +211,10 @@
             flex-shrink: 0;
         }
 
-        .op-stat-icon.put { background: rgba(251, 191, 36, 0.15); color: var(--color-put); }
-        .op-stat-icon.get { background: rgba(52, 211, 153, 0.15); color: var(--color-get); }
-        .op-stat-icon.update { background: rgba(167, 139, 250, 0.15); color: var(--color-update); }
-        .op-stat-icon.subscribe { background: rgba(244, 114, 182, 0.15); color: var(--color-subscribe); }
+        .op-stat-icon.put { background: rgba(181, 137, 0, 0.15); color: var(--color-put); }
+        .op-stat-icon.get { background: rgba(133, 153, 0, 0.15); color: var(--color-get); }
+        .op-stat-icon.update { background: rgba(108, 113, 196, 0.15); color: var(--color-update); }
+        .op-stat-icon.subscribe { background: rgba(211, 54, 130, 0.15); color: var(--color-subscribe); }
 
         .op-stat-content {
             flex: 1;

@@ -7,12 +7,11 @@
     <title>Freenet Network</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=20260222a">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/styles.css?v=20260526a">
     <script>
         // Apply saved theme before render to avoid flash of wrong theme.
         // Wrapped in try/catch because localStorage throws in Safari private browsing.
-        // Icon convention: ☀️ = "switch to light", 🌙 = "switch to dark" (shows target mode).
         // This script is intentionally a plain <script> (not a module) so it runs
         // synchronously before render and so toggleTheme() is accessible via onclick.
         (function() {
@@ -25,29 +24,16 @@
 
         function toggleTheme() {
             const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-            const icon = document.getElementById('theme-icon');
             if (isLight) {
-                // Switching to dark (default) — remove the key; no need to store default
                 document.documentElement.removeAttribute('data-theme');
-                if (icon) icon.textContent = '☀️';
                 try { localStorage.removeItem('theme'); } catch (e) {}
             } else {
-                // Switching to light
                 document.documentElement.setAttribute('data-theme', 'light');
-                if (icon) icon.textContent = '🌙';
                 try { localStorage.setItem('theme', 'light'); } catch (e) {}
             }
             // Notify canvas-based charts to re-render with new theme colors
             window.dispatchEvent(new Event('themechange'));
         }
-
-        // Sync icon on load when light mode was restored from localStorage
-        document.addEventListener('DOMContentLoaded', function() {
-            const icon = document.getElementById('theme-icon');
-            if (icon && document.documentElement.getAttribute('data-theme') === 'light') {
-                icon.textContent = '🌙';
-            }
-        });
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -66,8 +52,14 @@
                         <span id="status-dot" class="status-dot"></span>
                         <span id="status-text">Connecting...</span>
                     </div>
-                    <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode" onclick="toggleTheme()">
-                        <span class="theme-toggle-icon" id="theme-icon">☀️</span>
+                    <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode" onclick="toggleTheme()" aria-label="Toggle dark/light mode">
+                        <svg class="theme-toggle-icon theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="4"/>
+                            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+                        </svg>
+                        <svg class="theme-toggle-icon theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                        </svg>
                     </button>
                 </div>
             </header>
@@ -262,6 +254,6 @@
     </div>
 
 
-    <script type="module" src="js/app.js?v=20260228a"></script>
+    <script type="module" src="js/app.js?v=20260526a"></script>
 </body>
 </html>

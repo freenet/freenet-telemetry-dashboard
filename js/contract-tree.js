@@ -471,10 +471,10 @@ function layoutTree(roots, children, allNodes, canvasWidth, canvasHeight) {
 
 const EVENT_COLORS = {
     connect: '#7ecfef',
-    put: '#fbbf24',
-    get: '#34d399',
-    update: '#a78bfa',
-    subscribe: '#f472b6',
+    put: '#b58900',
+    get: '#859900',
+    update: '#6c71c4',
+    subscribe: '#d33682',
     other: '#9ca3af'
 };
 
@@ -568,14 +568,14 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
         const isSeeding = ps?.is_seeding;
 
         // Determine color
-        let fillColor = '#f472b6'; // default coral/pink for subscriber
-        let glowColor = 'rgba(244, 114, 182, 0.3)';
+        let fillColor = '#d33682'; // default coral/pink for subscriber
+        let glowColor = 'rgba(211, 54, 130, 0.3)';
 
         if (isGateway) {
             fillColor = '#f59e0b';
             glowColor = 'rgba(245, 158, 11, 0.4)';
         } else if (isYou) {
-            fillColor = '#10b981';
+            fillColor = '#2aa198';
             glowColor = 'rgba(16, 185, 129, 0.4)';
         }
 
@@ -627,7 +627,7 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
         if (isRoot && treeHasEdges && (isSeeding || !parentOf.has(nodeId))) {
             ctx.save();
             ctx.font = '10px sans-serif';
-            ctx.fillStyle = '#fbbf24';
+            ctx.fillStyle = '#b58900';
             ctx.textAlign = 'center';
             ctx.fillText('\u2605', pos.x, pos.y - NODE_RADIUS - 4);
             ctx.restore();
@@ -737,14 +737,14 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
 
             const pad = 20;
             ctx.setLineDash([4, 4]);
-            ctx.strokeStyle = 'rgba(248, 113, 113, 0.5)';
+            ctx.strokeStyle = 'rgba(220, 50, 47, 0.5)';
             ctx.lineWidth = 1;
             ctx.strokeRect(minX - pad, minY - pad, maxX - minX + 2 * pad, maxY - minY + 2 * pad);
             ctx.setLineDash([]);
 
             // "disconnected" label
             ctx.font = '8px "JetBrains Mono", monospace';
-            ctx.fillStyle = 'rgba(248, 113, 113, 0.6)';
+            ctx.fillStyle = 'rgba(220, 50, 47, 0.6)';
             ctx.textAlign = 'center';
             ctx.fillText('disconnected', (minX + maxX) / 2, minY - pad - 4);
         }

@@ -869,16 +869,16 @@ function getOrCreateStaticSvg() {
             <polygon points="0 0, 8 3, 0 6" fill="#7ecfef"/>
         </marker>
         <marker id="arrow-put" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#fbbf24"/>
+            <polygon points="0 0, 8 3, 0 6" fill="#b58900"/>
         </marker>
         <marker id="arrow-get" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#34d399"/>
+            <polygon points="0 0, 8 3, 0 6" fill="#859900"/>
         </marker>
         <marker id="arrow-update" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#a78bfa"/>
+            <polygon points="0 0, 8 3, 0 6" fill="#6c71c4"/>
         </marker>
         <marker id="arrow-subscribe" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#f472b6"/>
+            <polygon points="0 0, 8 3, 0 6" fill="#d33682"/>
         </marker>
         <marker id="arrow-other" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
@@ -1500,10 +1500,10 @@ function stopConnectionAnimation() {
 // Event type colors for hovered event line (matches CSS vars)
 const EVENT_LINE_COLORS = {
     connect:   '#7ecfef',
-    put:       '#fbbf24',
-    get:       '#34d399',
-    update:    '#a78bfa',
-    subscribe: '#f472b6',
+    put:       '#b58900',
+    get:       '#859900',
+    update:    '#6c71c4',
+    subscribe: '#d33682',
     transfer:  '#fb923c',  // warm orange
     other:     '#9ca3af'
 };
@@ -1871,7 +1871,7 @@ function drawSubscriptionLinksCanvas(ctx, peers, connections) {
 
     if (treeLines.length > 0) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(244, 114, 182, 0.9)';
+        ctx.strokeStyle = 'rgba(211, 54, 130, 0.9)';
         ctx.lineWidth = 2.5;
         ctx.lineCap = 'round';
         ctx.setLineDash([]);
@@ -1964,7 +1964,7 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
             label = peerName || 'GW';
         } else if (isYou) {
             if (!isNonSubscriber) {
-                fillColor = '#10b981';
+                fillColor = '#2aa198';
                 glowColor = 'rgba(16, 185, 129, 0.3)';
             }
             label = peerName || 'YOU';
@@ -1973,17 +1973,17 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
         }
 
         if (isEventSelected) {
-            fillColor = '#f87171';
-            glowColor = 'rgba(248, 113, 113, 0.3)';
+            fillColor = '#dc322f';
+            glowColor = 'rgba(220, 50, 47, 0.3)';
         } else if (isPeerSelected && !isYou) {
             fillColor = '#7ecfef';
             glowColor = 'rgba(126, 207, 239, 0.4)';
         } else if (isEventHovered) {
-            fillColor = '#fbbf24';
-            glowColor = 'rgba(251, 191, 36, 0.5)';
+            fillColor = '#b58900';
+            glowColor = 'rgba(181, 137, 0, 0.5)';
         } else if (isHighlighted) {
-            fillColor = '#fbbf24';
-            glowColor = 'rgba(251, 191, 36, 0.3)';
+            fillColor = '#b58900';
+            glowColor = 'rgba(181, 137, 0, 0.3)';
         }
 
         const isSpecial = isEventHovered || isHighlighted || isPeerSelected || isGateway || isYou;
@@ -2119,7 +2119,7 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
     // --- Pass 3.5: Selection ring (visible ring around selected peer) ---
     for (const d of peerRenderData) {
         if (!d.isPeerSelected) continue;
-        ctx.strokeStyle = d.isYou ? '#10b981' : '#7ecfef';
+        ctx.strokeStyle = d.isYou ? '#2aa198' : '#7ecfef';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(d.pos.x, d.pos.y, d.nodeSize + 4, 0, Math.PI * 2);

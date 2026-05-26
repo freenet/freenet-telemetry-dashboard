@@ -16,15 +16,18 @@
             --accent-dark: #0052cc;
             --accent-glow: rgba(0, 127, 255, 0.4);
 
+            /* Event/op colors: Solarized accents paired with brand cyan for conn.
+               Hand-picked palette (Ethan Schoonover, 2011) avoids the Tailwind-default
+               look and stays legible against #06080c. */
             --color-connect: #7ecfef;
-            --color-put: #fbbf24;
-            --color-get: #34d399;
-            --color-update: #a78bfa;
-            --color-subscribe: #f472b6;
-            --color-error: #f87171;
+            --color-put: #b58900;
+            --color-get: #859900;
+            --color-update: #6c71c4;
+            --color-subscribe: #d33682;
+            --color-error: #dc322f;
 
-            --font-mono: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
-            --font-sans: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+            --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
         }
 
         /* Light mode overrides */
@@ -42,16 +45,7 @@
 
         [data-theme="light"] body::before {
             background:
-                radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.06) 0%, transparent 50%),
-                radial-gradient(ellipse at 80% 50%, rgba(126, 207, 239, 0.04) 0%, transparent 40%),
-                radial-gradient(ellipse at 20% 80%, rgba(0, 82, 204, 0.04) 0%, transparent 40%);
-        }
-
-        [data-theme="light"] body::after {
-            background-image:
-                linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
-            background-size: 50px 50px;
+                radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.03) 0%, transparent 55%);
         }
 
         [data-theme="light"] .contract-search-input {
@@ -86,7 +80,9 @@
             overflow-x: hidden;
         }
 
-        /* Atmospheric background */
+        /* Subtle atmospheric tint — single soft gradient at the top.
+           Removed: full-screen 50px grid overlay and the corner radial glows that
+           gave the panel its generated-dashboard feel. */
         body::before {
             content: '';
             position: fixed;
@@ -94,26 +90,7 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background:
-                radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.08) 0%, transparent 50%),
-                radial-gradient(ellipse at 80% 50%, rgba(126, 207, 239, 0.05) 0%, transparent 40%),
-                radial-gradient(ellipse at 20% 80%, rgba(0, 82, 204, 0.05) 0%, transparent 40%);
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        /* Grid overlay */
-        body::after {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-image:
-                linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-            background-size: 50px 50px;
+            background: radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.04) 0%, transparent 55%);
             pointer-events: none;
             z-index: 0;
         }

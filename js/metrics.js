@@ -15,15 +15,15 @@ function isLightMode() {
 function getColors() {
     const light = isLightMode();
     return {
-        put: '#fbbf24',
-        get: '#34d399',
-        update: '#a78bfa',
+        put: '#b58900',
+        get: '#859900',
+        update: '#6c71c4',
         peers: '#7ecfef',
         grid: light ? 'rgba(148, 163, 184, 0.25)' : 'rgba(48, 54, 61, 0.3)',
         text: light ? '#475569' : '#8b949e',
         textMuted: light ? '#94a3b8' : '#484f58',
-        versionLine: 'rgba(244, 114, 182, 0.25)',
-        versionText: '#f472b6',
+        versionLine: 'rgba(211, 54, 130, 0.25)',
+        versionText: '#d33682',
         tooltipBg: light ? 'rgba(255, 255, 255, 0.95)' : 'rgba(13, 17, 23, 0.95)',
         tooltipBorder: light ? 'rgba(0, 0, 0, 0.12)' : 'rgba(48, 54, 61, 0.6)',
         tooltipTitle: light ? '#0f172a' : '#e6edf3',

@@ -12,9 +12,9 @@
         .panel {
             background: var(--bg-panel);
             border: 1px solid var(--border-color);
-            border-radius: 20px;
+            border-radius: 8px;
             padding: 24px;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(5px);
             position: relative;
             min-width: 0; /* prevent grid child from overflowing */
         }
@@ -33,7 +33,7 @@
             font-size: 0.9em;
             font-weight: 500;
             color: var(--text-secondary);
-            letter-spacing: 0.08em;
+            letter-spacing: 0.03em;
         }
 
         .panel-time-label {
@@ -46,13 +46,13 @@
         }
         .panel-time-label.live {
             color: var(--color-connect);
-            background: rgba(52, 211, 153, 0.15);
+            background: rgba(133, 153, 0, 0.15);
         }
 
         .tab-count {
             font-size: 0.85em;
             padding: 2px 6px;
-            background: rgba(244, 114, 182, 0.2);
+            background: rgba(211, 54, 130, 0.2);
             color: var(--color-subscribe);
             border-radius: 10px;
             margin-left: 4px;
@@ -130,12 +130,12 @@
         }
 
         .contract-item:hover {
-            background: rgba(244, 114, 182, 0.1);
-            border-color: rgba(244, 114, 182, 0.3);
+            background: rgba(211, 54, 130, 0.1);
+            border-color: rgba(211, 54, 130, 0.3);
         }
 
         .contract-item.selected {
-            background: rgba(244, 114, 182, 0.15);
+            background: rgba(211, 54, 130, 0.15);
             border-color: var(--color-subscribe);
         }
 
@@ -220,12 +220,12 @@
         }
 
         .sparkline-fill {
-            fill: rgba(34, 197, 94, 0.5);
+            fill: rgba(133, 153, 0, 0.5);
         }
 
         .sparkline-line {
             fill: none;
-            stroke: #22c55e;
+            stroke: #859900;
             stroke-width: 2;
         }
 
@@ -241,12 +241,12 @@
             font-size: 0.8em;
             padding: 2px 6px;
             border-radius: 4px;
-            background: rgba(59, 130, 246, 0.2);
+            background: rgba(0, 127, 255, 0.2);
             color: var(--color-update);
         }
 
         .state-hash.transition {
-            background: rgba(139, 92, 246, 0.2);
+            background: rgba(108, 113, 196, 0.2);
         }
 
         .state-synced {
@@ -254,7 +254,7 @@
         }
 
         .state-diverged {
-            color: #ef4444;
+            color: #dc322f;
         }
 
         .sync-indicator {
@@ -264,13 +264,13 @@
         }
 
         .sync-indicator.synced {
-            background: rgba(34, 197, 94, 0.15);
+            background: rgba(133, 153, 0, 0.15);
             color: var(--color-get);
         }
 
         .sync-indicator.diverged {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
+            background: rgba(220, 50, 47, 0.15);
+            color: #dc322f;
         }
 
         .sync-indicator.unknown {
@@ -338,20 +338,20 @@
         }
 
         .filter-chip.contract {
-            background: rgba(244, 114, 182, 0.15);
-            border-color: rgba(244, 114, 182, 0.3);
+            background: rgba(211, 54, 130, 0.15);
+            border-color: rgba(211, 54, 130, 0.3);
             color: var(--color-subscribe);
         }
 
         .filter-chip.peer {
-            background: rgba(52, 211, 153, 0.15);
-            border-color: rgba(52, 211, 153, 0.3);
+            background: rgba(133, 153, 0, 0.15);
+            border-color: rgba(133, 153, 0, 0.3);
             color: var(--color-get);
         }
 
         .filter-chip.tx {
-            background: rgba(251, 191, 36, 0.15);
-            border-color: rgba(251, 191, 36, 0.3);
+            background: rgba(181, 137, 0, 0.15);
+            border-color: rgba(181, 137, 0, 0.3);
             color: var(--color-put);
         }
 
@@ -408,8 +408,8 @@
             align-items: center;
             gap: 6px;
             padding: 4px 10px;
-            background: rgba(244, 114, 182, 0.1);
-            border: 1px solid rgba(244, 114, 182, 0.3);
+            background: rgba(211, 54, 130, 0.1);
+            border: 1px solid rgba(211, 54, 130, 0.3);
             border-radius: 4px;
             color: var(--color-subscribe);
             font-family: var(--font-mono);
@@ -419,7 +419,7 @@
         }
 
         .contract-dropdown-btn:hover {
-            background: rgba(244, 114, 182, 0.2);
+            background: rgba(211, 54, 130, 0.2);
         }
 
         .contract-dropdown-menu {
