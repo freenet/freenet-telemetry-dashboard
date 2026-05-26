@@ -7,6 +7,10 @@
             position: relative;
             aspect-ratio: 1;
             max-height: 600px;
+            /* aspect-ratio + max-height clamps width to 600 even when the panel is
+               wider, so center the resulting square within the panel. */
+            margin-left: auto;
+            margin-right: auto;
         }
 
         /* Legend */
