@@ -5,6 +5,7 @@
 
 import { state } from './state.js';
 import { addTransferEvents, addTransferEvent } from './transfers.js';
+import { setPeerResources, updatePeerResource } from './resources.js';
 import { formatLatency, getRateClass, indexEventForActivity, clearActivityIndex, rebuildActivityIndex } from './utils.js';
 
 /**
@@ -191,6 +192,12 @@ function handleMessage(data, callbacks) {
             console.log('Transfers loaded:', data.transfers.length);
         }
 
+        // Load per-node resource-utilization snapshot (#4642 A1)
+        if (data.peer_resources) {
+            setPeerResources(data.peer_resources);
+            console.log('Peer resources:', Object.keys(data.peer_resources).length);
+        }
+
         // Store peer and connection data
         if (data.peers) {
             state.initialStatePeers = data.peers;
@@ -286,6 +293,9 @@ function handleMessage(data, callbacks) {
     } else if (data.type === 'transfer') {
         // Real-time transfer event for scatter plot
         addTransferEvent(data);
+    } else if (data.type === 'resource') {
+        // Real-time per-node resource-utilization sample (#4642 A1)
+        updatePeerResource(data);
     } else if (data.type === 'peer_name_update') {
         state.peerNames[data.ip_hash] = data.name;
         console.log(`Peer ${data.ip_hash} named: ${data.name}${data.was_modified ? ' (adjusted)' : ''}`);

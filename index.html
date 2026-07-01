@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=20260526c">
+    <link rel="stylesheet" href="css/styles.css?v=20260701a">
     <script>
         // Apply saved theme before render to avoid flash of wrong theme.
         // Wrapped in try/catch because localStorage throws in Safari private browsing.
@@ -154,6 +154,7 @@
                             <button class="panel-tab active" id="tab-contracts" onclick="switchRightTab('contracts')">Contracts <span class="tab-count" id="contract-tab-count">0</span></button>
                             <button class="panel-tab" id="tab-performance" onclick="switchRightTab('performance')">Performance</button>
                             <button class="panel-tab" id="tab-versions" onclick="switchRightTab('versions')">Versions</button>
+                            <button class="panel-tab" id="tab-resources" onclick="switchRightTab('resources')">Resources</button>
                         </div>
                     </div>
                     <div id="contracts-panel-content">
@@ -186,6 +187,14 @@
                             <div class="empty-state">
                                 <div class="empty-state-icon">&#128230;</div>
                                 <div>Loading version data...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="resources-panel-content" class="performance-panel" style="display: none;">
+                        <div class="resources-container" id="resources-container">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">&#128190;</div>
+                                <div>Loading resource data...</div>
                             </div>
                         </div>
                     </div>
@@ -254,6 +263,6 @@
     </div>
 
 
-    <script type="module" src="js/app.js?v=20260526c"></script>
+    <script type="module" src="js/app.js?v=20260701a"></script>
 </body>
 </html>

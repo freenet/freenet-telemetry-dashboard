@@ -808,6 +808,13 @@ transaction_order = []  # List of tx_ids in order for pruning
 MAX_TRANSFER_EVENTS = 1000
 transfer_events = []
 
+# Latest node resource-utilization sample per peer (freenet-core #4642 A1
+# telemetry: memory RSS + ceiling, CPU time, cumulative bandwidth). Keyed by
+# anonymized peer IP so it lines up with the topology peer.id. Populated from
+# `resource_utilization` events; production (public-IP) peers only. Bounded by
+# the number of live production peers and pruned in cleanup_stale_peers().
+peer_resources = {}  # anon_ip -> {peer, peer_id, ip_hash, location, timestamp, memory_*, cpu_*, cumulative_*}
+
 # Pattern to parse peer strings like: "PeerId@IP:port (@ location)"
 PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)')
 
@@ -934,6 +941,11 @@ def cleanup_stale_peers():
     stale_anon_ids = set()
     for ip in stale_ips:
         stale_anon_ids.add(anonymize_ip(ip))
+
+    # Prune resource samples for stale peers (#4642 A1 telemetry) so the
+    # per-peer resource map stays bounded to live production peers.
+    for anon in stale_anon_ids:
+        peer_resources.pop(anon, None)
 
     # 3. Remove from peers dict
     removed_peers = []
@@ -1472,6 +1484,33 @@ def process_record(record, store_history=True):
                 transfer_events.pop(0)
             # Return transfer event for real-time broadcasting
             return transfer_event
+
+    # Node self-resource-utilization sample (freenet-core #4642 A1). The
+    # reporting node's own identity is in the peer_id ATTRIBUTE (the body has no
+    # this_peer/target IP), so it never reaches the display_ip logic below and
+    # would otherwise be dropped. We key it by the anonymized public IP so the
+    # resource panel aligns with the topology's peer.id. Production peers only —
+    # test/CI nodes (private IPs) are filtered like everywhere else in the
+    # dashboard. Returns a dedicated "resource" message for live broadcast.
+    elif event_type == "resource_utilization":
+        r_pid, r_ip, r_loc = parse_peer_string(attrs.get("peer_id", ""))
+        if r_ip and is_public_ip(r_ip):
+            anon = anonymize_ip(r_ip)
+            sample = {
+                "peer": anon,
+                "peer_id": r_pid,
+                "ip_hash": ip_hash(r_ip),
+                "location": r_loc,
+                "timestamp": timestamp,
+                "memory_rss_bytes": body.get("memory_rss_bytes"),
+                "memory_limit_bytes": body.get("memory_limit_bytes"),
+                "cpu_time_seconds": body.get("cpu_time_seconds"),
+                "cumulative_bytes_sent": body.get("cumulative_bytes_sent"),
+                "cumulative_bytes_received": body.get("cumulative_bytes_received"),
+            }
+            peer_resources[anon] = sample
+            return {"type": "resource", "event_type": "resource_utilization", **sample}
+        return None
 
     # Handle new subscription tree telemetry events (v0.1.70+)
     # Each event is reported by a specific peer - we track state per (contract, peer)
@@ -2214,6 +2253,15 @@ def get_network_state():
     active_ip_hashes = {ip_hash(ip) for ip in active_peer_ips}
     active_peer_names = {h: n for h, n in peer_names.items() if h in active_ip_hashes}
 
+    # Resource-utilization snapshot (#4642 A1): only for currently-active peers
+    # and only samples fresh enough to be meaningful. Keyed by anonymized IP,
+    # matching peer.id in the peer_list above.
+    active_anon_ids = {anonymize_ip(ip) for ip in active_peer_ips}
+    active_peer_resources = {
+        anon: s for anon, s in peer_resources.items()
+        if anon in active_anon_ids and (now_ns - s.get("timestamp", 0)) < STALE_THRESHOLD_NS
+    }
+
     return {
         "type": "state",
         "peers": peer_list,
@@ -2228,6 +2276,7 @@ def get_network_state():
             "peers": topology_lifecycle + other_lifecycle,
         },
         "peer_names": active_peer_names,  # ip_hash -> name (active peers only)
+        "peer_resources": active_peer_resources,  # anon_ip -> latest resource sample (#4642 A1)
         "transfers": transfer_events[-200:],  # Last 200 transfer events for scatter plot
         "propagation": get_propagation_data(),  # State propagation timelines
         "metrics_timeseries": get_metrics_timeseries(),
@@ -2538,7 +2587,12 @@ async def tail_log():
                         for scope_log in resource_log.get("scopeLogs", []):
                             for record in scope_log.get("logRecords", []):
                                 event = process_record(record, store_history=True)
-                                if event and event["event_type"] in REALTIME_EVENT_TYPES:
+                                if event and event.get("type") == "resource":
+                                    # Low-volume node self-resource samples (#4642
+                                    # A1): broadcast live on their own message type,
+                                    # decoupled from the event/transaction pipeline.
+                                    await broadcast(event)
+                                elif event and event["event_type"] in REALTIME_EVENT_TYPES:
                                     await buffer_event(event)  # Buffer for batched sending
                 except orjson.JSONDecodeError:
                     continue

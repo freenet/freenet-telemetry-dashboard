@@ -31,6 +31,7 @@ import { initTransferChart, addTransferEvents, addTransferEvent, renderTransferC
 import { updateContractTree, getTreeStats, resetContractTree, triggerTreeMessageAnim, buildTree } from './contract-tree.js';
 import { initMetricsChart, updateMetricsChart, destroyMetricsChart } from './metrics.js';
 import { initVersionsChart, updateVersionsChart, destroyVersionsChart } from './versions.js';
+import { initResourcesPanel, updateResourcesPanel, destroyResourcesPanel } from './resources.js';
 
 // ============================================================================
 // Main Application Functions
@@ -273,19 +274,24 @@ function switchRightTab(tab) {
     const contractsContent = document.getElementById('contracts-panel-content');
     const performanceContent = document.getElementById('performance-panel-content');
     const versionsContent = document.getElementById('versions-panel-content');
+    const resourcesContent = document.getElementById('resources-panel-content');
     const tabContracts = document.getElementById('tab-contracts');
     const tabPerformance = document.getElementById('tab-performance');
     const tabVersions = document.getElementById('tab-versions');
+    const tabResources = document.getElementById('tab-resources');
 
     // Hide all
     contractsContent.style.display = 'none';
     performanceContent.style.display = 'none';
     versionsContent.style.display = 'none';
+    resourcesContent.style.display = 'none';
     tabContracts.classList.remove('active');
     tabPerformance.classList.remove('active');
     tabVersions.classList.remove('active');
+    tabResources.classList.remove('active');
     destroyMetricsChart();
     destroyVersionsChart();
+    destroyResourcesPanel();
 
     if (tab === 'performance') {
         performanceContent.style.display = 'flex';
@@ -297,6 +303,11 @@ function switchRightTab(tab) {
         tabVersions.classList.add('active');
         const container = document.getElementById('versions-chart-container');
         initVersionsChart(container);
+    } else if (tab === 'resources') {
+        resourcesContent.style.display = 'flex';
+        tabResources.classList.add('active');
+        const container = document.getElementById('resources-container');
+        initResourcesPanel(container);
     } else {
         contractsContent.style.display = '';
         tabContracts.classList.add('active');

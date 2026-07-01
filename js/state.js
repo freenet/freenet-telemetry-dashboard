@@ -51,8 +51,11 @@ export const state = {
     metricsTimeseries: null,
     versionRollout: null,
 
+    // Per-node resource utilization (#4642 A1): anon_ip -> latest sample
+    peerResources: {},
+
     // Right panel tab
-    rightPanelTab: 'contracts',  // 'contracts' | 'performance'
+    rightPanelTab: 'contracts',  // 'contracts' | 'performance' | 'versions' | 'resources'
 
     // Display
     displayedEvents: [],
