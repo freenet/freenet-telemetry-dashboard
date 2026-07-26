@@ -14,7 +14,11 @@ import { formatLatency, getRateClass, indexEventForActivity, clearActivityIndex,
  */
 export function connect(callbacks) {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    let wsUrl = `${wsProtocol}//${window.location.hostname}:3134/`;
+    // Connect same-origin via /ws, which the reverse proxy forwards to the
+    // ws server on :3134. The ws server speaks plain WebSocket only, so under
+    // HTTPS the browser's mandatory wss: must terminate at the proxy — a direct
+    // :3134 connection would fail the handshake.
+    let wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
     // Include priority token if we have one (returning user)
     const token = localStorage.getItem('dashboard_priority_token');
