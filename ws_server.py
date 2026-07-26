@@ -1353,6 +1353,21 @@ def process_record(record, store_history=True):
     if not event_type:
         return None
 
+    # Synthetic network checks (freenet-core #4665). Handled before any peer
+    # parsing: these report from a client, so they have no peer IP and the
+    # `if not display_ip` guard below would drop them. They also skip
+    # HISTORY_EVENT_TYPES: check results have their own tables and are not
+    # subject to the 24h prune.
+    #
+    # A new kind of check is a new `scenario` value, never a new event type.
+    if event_type in ("netcheck_run", "netcheck_op"):
+        body.setdefault("timestamp", timestamp)
+        if event_type == "netcheck_run":
+            db.insert_check_run(body)
+        else:
+            db.insert_check_op(body)
+        return {"type": "check", "event_type": event_type, **body}
+
     # Get body type for more specific event types (especially for connect events)
     # event_type from attrs is generic ("connect"), body type is specific ("start_connection", "connected", "finished")
     body_type = body.get("type", "")
@@ -2320,6 +2335,7 @@ def get_network_state():
         "propagation": get_propagation_data(),  # State propagation timelines
         "metrics_timeseries": get_metrics_timeseries(),
         "version_rollout": get_version_rollout(),
+        "checks": db.get_check_state(),  # synthetic network checks (#4665)
     }
 
 
@@ -2630,6 +2646,10 @@ async def tail_log():
                                     # Low-volume node self-resource samples (#4642
                                     # A1): broadcast live on their own message type,
                                     # decoupled from the event/transaction pipeline.
+                                    await broadcast(event)
+                                elif event and event.get("type") == "check":
+                                    # Already persisted by process_record (#4665);
+                                    # broadcast so an open panel updates live.
                                     await broadcast(event)
                                 elif event and event["event_type"] in REALTIME_EVENT_TYPES:
                                     await buffer_event(event)  # Buffer for batched sending

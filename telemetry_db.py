@@ -94,6 +94,43 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Synthetic network checks (freenet-core #4665). Separate tables because the
+-- value here is the multi-week trend: the 48h prune that the telemetry
+-- firehose needs would delete a 7-day retention series before it could be
+-- plotted. prune() must never touch these.
+-- Keyed by (scenario, run_id): run ids are the nightly's timestamp, so two
+-- checks running the same night would otherwise overwrite each other.
+CREATE TABLE IF NOT EXISTS check_runs (
+    run_id           TEXT    NOT NULL,
+    scenario         TEXT    NOT NULL,   -- "put_get", "update_propagation", ...
+    vantage          TEXT    NOT NULL,   -- where it ran from: "nova", "ci", ...
+    timestamp_ns     INTEGER NOT NULL,
+    duration_ms      INTEGER,
+    verdict          TEXT    NOT NULL,   -- pass | degraded | fail | error
+    ops_total        INTEGER,
+    ops_failed       INTEGER,
+    software_version TEXT,
+    conditions       TEXT,              -- JSON blob, UI-opaque
+    PRIMARY KEY (scenario, run_id)
+);
+
+CREATE TABLE IF NOT EXISTS check_ops (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         TEXT    NOT NULL,
+    scenario       TEXT    NOT NULL,
+    vantage        TEXT    NOT NULL,
+    timestamp_ns   INTEGER NOT NULL,
+    op             TEXT    NOT NULL,     -- put | get | update | subscribe | ...
+    dimension      TEXT,                 -- "0h", "24h", "7d", "join", ...
+    dimension_secs INTEGER,              -- numeric form for ordering; NULL if N/A
+    contract_key   TEXT,                 -- join key into events/transactions/flows
+    ok             INTEGER NOT NULL,
+    latency_ms     REAL,
+    bytes          INTEGER,
+    error          TEXT,
+    extra          TEXT                  -- JSON blob, UI-opaque
+);
 """
 
 # Indexes are created separately so they can be deferred on large DBs.
@@ -112,6 +149,10 @@ SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_check_runs_scenario_ts ON check_runs(scenario, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_check_ops_scenario_ts ON check_ops(scenario, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_check_ops_run ON check_ops(scenario, run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_check_ops_contract ON check_ops(contract_key) WHERE contract_key IS NOT NULL",
 ]
 
 
@@ -876,6 +917,103 @@ class TelemetryDB:
             (key, str(value)),
         )
 
+    # ---- Network checks (freenet-core #4665) ----
+    #
+    # Unbuffered: a few rows a night, so batching would only add a window in
+    # which a restart loses a night's verdict.
+
+    def insert_check_run(self, body):
+        if not self._enabled:
+            return
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO check_runs (run_id, scenario, vantage, "
+                "timestamp_ns, duration_ms, verdict, ops_total, ops_failed, "
+                "software_version, conditions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    body.get("run_id"),
+                    body.get("scenario", "unknown"),
+                    body.get("vantage", "unknown"),
+                    int(body.get("timestamp") or 0),
+                    body.get("duration_ms"),
+                    body.get("verdict", "unknown"),
+                    body.get("ops_total"),
+                    body.get("ops_failed"),
+                    body.get("software_version"),
+                    orjson.dumps(body.get("conditions") or {}).decode(),
+                ),
+            )
+        except Exception as e:
+            print(f"[db] insert_check_run error: {e}")
+
+    def insert_check_op(self, body):
+        if not self._enabled:
+            return
+        try:
+            self.conn.execute(
+                "INSERT INTO check_ops (run_id, scenario, vantage, timestamp_ns, op, "
+                "dimension, dimension_secs, contract_key, ok, latency_ms, bytes, "
+                "error, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    body.get("run_id"),
+                    body.get("scenario", "unknown"),
+                    body.get("vantage", "unknown"),
+                    int(body.get("timestamp") or 0),
+                    body.get("op", "unknown"),
+                    body.get("dimension"),
+                    body.get("dimension_secs"),
+                    body.get("contract_key"),
+                    1 if body.get("ok") else 0,
+                    body.get("latency_ms"),
+                    body.get("bytes"),
+                    body.get("error"),
+                    orjson.dumps(body.get("extra")).decode() if body.get("extra") else None,
+                ),
+            )
+        except Exception as e:
+            print(f"[db] insert_check_op error: {e}")
+
+    def get_check_state(self, run_limit=60):
+        """Everything the checks panel needs, in one round trip.
+
+        Scenarios and dimensions are discovered from the data, never enumerated:
+        a new scenario must light up the panel with no dashboard change.
+        """
+        if not self._enabled or not self.conn:
+            return {"runs": [], "ops": [], "scenarios": []}
+        try:
+            run_cols = ("run_id", "scenario", "vantage", "timestamp_ns", "duration_ms",
+                        "verdict", "ops_total", "ops_failed", "software_version")
+            runs = [
+                dict(zip(run_cols, r))
+                for r in self.conn.execute(
+                    f"SELECT {', '.join(run_cols)} FROM check_runs "
+                    "ORDER BY timestamp_ns DESC LIMIT ?", (run_limit,)
+                )
+            ]
+            op_cols = ("run_id", "scenario", "vantage", "timestamp_ns", "op", "dimension",
+                       "dimension_secs", "contract_key", "ok", "latency_ms", "bytes", "error")
+            if runs:
+                # Match on (scenario, run_id): run ids repeat across scenarios.
+                pairs = [(r["scenario"], r["run_id"]) for r in runs]
+                clause = " OR ".join(["(scenario = ? AND run_id = ?)"] * len(pairs))
+                params = [v for pair in pairs for v in pair]
+                ops = [
+                    dict(zip(op_cols, r))
+                    for r in self.conn.execute(
+                        f"SELECT {', '.join(op_cols)} FROM check_ops "
+                        f"WHERE {clause} ORDER BY timestamp_ns", params
+                    )
+                ]
+            else:
+                ops = []
+            scenarios = [r[0] for r in self.conn.execute(
+                "SELECT DISTINCT scenario FROM check_runs ORDER BY scenario")]
+            return {"runs": runs, "ops": ops, "scenarios": scenarios}
+        except Exception as e:
+            print(f"[db] get_check_state error: {e}")
+            return {"runs": [], "ops": [], "scenarios": []}
+
     # ---- Maintenance ----
 
     def prune(self, retention_ns=DEFAULT_RETENTION_NS,
@@ -895,6 +1033,8 @@ class TelemetryDB:
         total = 0
         hit_budget = False
         try:
+            # check_runs/check_ops are deliberately absent: their retention is
+            # measured in weeks, not hours (see SCHEMA_TABLES).
             while True:
                 if time.monotonic() >= deadline:
                     hit_budget = True

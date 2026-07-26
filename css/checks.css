@@ -1,0 +1,85 @@
+/* ── Synthetic network checks panel (freenet-core #4665) ─────────────────── */
+#checks-panel-content { flex-direction: column; }
+.checks-container {
+    padding: 12px 14px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-primary);
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.checks-empty { color: var(--text-muted); padding: 24px; text-align: center; }
+.checks-grid { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; flex: 0 0 auto; }
+.checks-row { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.checks-scenario { display: flex; align-items: baseline; gap: 8px; }
+.checks-name { color: var(--accent-light); }
+.checks-when { color: var(--text-muted); font-size: 10px; }
+.checks-cells { display: flex; gap: 3px; flex-wrap: wrap; }
+.checks-cell {
+    width: 14px; height: 14px; flex: 0 0 auto; box-sizing: border-box; border: 1px solid var(--border-color);
+    border-radius: 2px; padding: 0; cursor: pointer; background: var(--bg-tertiary);
+}
+.checks-cell.selected { outline: 1px solid var(--accent-primary); outline-offset: 1px; }
+.checks-cell.ok { background: var(--color-get); }
+.checks-cell.warn { background: var(--color-put); }
+.checks-cell.bad { background: var(--color-error); }
+.checks-cell.muted { background: var(--text-muted); }
+.checks-verdict { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.checks-verdict.ok, .checks-table td.ok { color: var(--color-get); }
+.checks-verdict.warn, .checks-table td.warn { color: var(--color-put); }
+.checks-verdict.bad, .checks-table td.bad { color: var(--color-error); }
+.checks-verdict.muted { color: var(--text-muted); }
+.checks-section-title {
+    margin: 14px 0 6px; color: var(--text-secondary);
+    display: flex; align-items: baseline; gap: 8px;
+}
+.checks-table { width: 100%; border-collapse: collapse; }
+.checks-table th {
+    text-align: left; color: var(--text-muted); font-weight: normal;
+    border-bottom: 1px solid var(--border-color); padding: 3px 6px 3px 0;
+}
+.checks-table td { padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(48,54,61,.25); }
+.checks-table tr.bad-row td { background: rgba(248, 113, 113, 0.06); }
+.checks-key, .checks-err {
+    color: var(--text-secondary); max-width: 130px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+}
+.checks-intro { color: var(--text-secondary); margin-bottom: 8px; line-height: 1.5; }
+.checks-legend {
+    display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 14px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border-color);
+}
+.checks-legend-item { display: flex; align-items: center; gap: 6px; }
+.checks-legend-item .checks-cell { cursor: default; }
+.checks-empty-title { color: var(--text-secondary); margin-bottom: 8px; }
+.checks-empty { line-height: 1.7; max-width: 42em; margin: 40px auto; }
+.checks-err { max-width: 220px; white-space: normal; overflow: visible; }
+
+/* Matrix view: rows = what was read, columns = runs (oldest left). */
+.checks-scenario-block { margin-bottom: 18px; }
+.checks-mrow { display: flex; align-items: center; gap: 10px; margin: 3px 0; }
+.checks-mlabel {
+    width: 190px; flex: 0 0 auto; display: flex; gap: 8px;
+    color: var(--text-secondary); justify-content: flex-end; text-align: right;
+}
+.checks-op { color: var(--accent-light); }
+.checks-mrate { width: 42px; flex: 0 0 auto; text-align: right; }
+.checks-mmed { width: 56px; flex: 0 0 auto; text-align: right; color: var(--text-muted); }
+.checks-cell.none { background: transparent; border-style: dashed; }
+.checks-axis { color: var(--text-muted); font-size: 10px; height: 13px; }
+.checks-axis .checks-cells { overflow: visible; }
+.checks-slot { width: 17px; flex: 0 0 auto; white-space: nowrap; overflow: visible; }
+.checks-slot .ver { color: var(--accent-light); }
+.checks-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.checks-tab {
+    display: flex; align-items: center; gap: 7px; padding: 4px 9px;
+    background: var(--bg-tertiary); border: 1px solid var(--border-color);
+    border-radius: 3px; color: var(--text-secondary);
+    font-family: inherit; font-size: inherit; cursor: pointer;
+}
+.checks-tab:hover { border-color: var(--accent-primary); }
+.checks-tab.active { color: var(--text-primary); border-color: var(--accent-primary); }
+.checks-tab .checks-cell { cursor: pointer; }
