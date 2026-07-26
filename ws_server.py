@@ -33,9 +33,12 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
-TELEMETRY_LOG = Path("/mnt/media/freenet-telemetry/logs.jsonl")
-WS_PORT = 3134
-PEER_NAMES_FILE = Path("/var/www/freenet-dashboard/peer_names.json")
+# Defaults are the gateway-host layout; overridable to run against a local collector.
+TELEMETRY_LOG = Path(os.environ.get(
+    "FREENET_TELEMETRY_LOG", "/mnt/media/freenet-telemetry/logs.jsonl"))
+WS_PORT = int(os.environ.get("FREENET_DASHBOARD_WS_PORT", "3134"))
+PEER_NAMES_FILE = Path(os.environ.get(
+    "FREENET_PEER_NAMES_FILE", "/var/www/freenet-dashboard/peer_names.json"))
 
 # Connection limits - reserve slots for returning users and peers
 MAX_CLIENTS = 300           # Total max connections
@@ -834,10 +837,17 @@ def ip_hash(ip: str) -> str:
     return hashlib.sha256(ip.encode()).hexdigest()[:6]
 
 
+# Local development only: without this the filter below hides every node a
+# developer can run. In production it would let test/CI nodes into the topology.
+ALLOW_PRIVATE_IPS = os.environ.get("FREENET_DASHBOARD_ALLOW_PRIVATE_IPS") == "1"
+
+
 def is_public_ip(ip: str) -> bool:
     """Check if IP is a public (non-test) address."""
     if not ip:
         return False
+    if ALLOW_PRIVATE_IPS:
+        return ip != "localhost"
     if ip.startswith("127.") or ip.startswith("172.") or ip.startswith("10.") or ip.startswith("192.168."):
         return False
     if ip.startswith("0.") or ip == "localhost":
