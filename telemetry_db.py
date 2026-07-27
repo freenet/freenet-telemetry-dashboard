@@ -19,10 +19,28 @@ import orjson
 # Default DB path alongside ws_server.py
 DEFAULT_DB_PATH = "/var/www/freenet-dashboard/telemetry.db"
 
-# Keep 48 hours of data by default. The telemetry firehose is ~46 GB/day, so a
-# 7-day window grew the DB past 300 GB and filled the root disk (2026-05-22).
-# 48h keeps a full day of lookback with margin; tune this constant to taste.
-DEFAULT_RETENTION_NS = 48 * 60 * 60 * 1_000_000_000
+# Keep 24 hours of data by default. The telemetry firehose scales with the peer
+# count, and the network doubled in two days (2026-07-26), which put the DB at
+# 157 GB on a volume with 168 GB free — a 48h window leaves no room for another
+# doubling. A 7-day window previously grew the DB past 300 GB and filled the
+# root disk (2026-05-22). 24h keeps a full day of lookback at roughly half the
+# footprint; the raw JSONL retains a comparable window if deeper lookback is
+# needed. Tune this constant to taste — lowering it takes effect on the next
+# prune() and drains gradually, since prune() works in bounded batches.
+DEFAULT_RETENTION_NS = 24 * 60 * 60 * 1_000_000_000
+
+# prune() batching. A retention cut (or a long outage) leaves a backlog far
+# larger than one cycle's worth of data; deleting it in a single transaction
+# balloons the WAL and blocks ingest for the whole delete. A runaway WAL grew a
+# 329 GB husk and filled the disk (2026-05-22). Bounded batches keep each
+# transaction small and let a backlog drain over many cycles instead.
+PRUNE_ROW_BATCH = 20_000  # rows per DELETE for events/flows
+PRUNE_TX_BATCH = 2_000  # transactions (with their tx_events) per DELETE
+# ws_server is single-threaded asyncio, so prune() blocks the event loop (and
+# therefore the log tailer and every WebSocket client) for as long as it runs.
+# Keep the budget short: in steady state prune returns early once the ~60s of
+# newly-expired rows are gone, and a backlog just takes more cycles to drain.
+PRUNE_TIME_BUDGET_S = 5.0  # max wall-clock spent pruning per call
 
 SCHEMA_TABLES = """
 -- Events: replaces event_history deque
@@ -858,32 +876,83 @@ class TelemetryDB:
 
     # ---- Maintenance ----
 
-    def prune(self, retention_ns=DEFAULT_RETENTION_NS):
-        """Remove data older than retention period."""
+    def prune(self, retention_ns=DEFAULT_RETENTION_NS,
+              time_budget_s=PRUNE_TIME_BUDGET_S):
+        """Remove data older than the retention period, in bounded batches.
+
+        Returns the number of rows deleted. Each batch is its own transaction,
+        and the total work is capped by ``time_budget_s`` — whatever is left
+        over is picked up by the next call. A large backlog (after cutting
+        retention, or after an outage) therefore drains over many cycles
+        instead of stalling ingest inside one multi-GB DELETE.
+        """
         if not self._enabled:
-            return
+            return 0
         cutoff = int(time.time() * 1_000_000_000) - retention_ns
+        deadline = time.monotonic() + time_budget_s
+        total = 0
+        hit_budget = False
         try:
-            self.conn.execute("BEGIN")
-            self.conn.execute("DELETE FROM events WHERE timestamp_ns < ?", (cutoff,))
-            self.conn.execute("DELETE FROM flows WHERE timestamp_ns < ?", (cutoff,))
-            # Delete tx_events for old transactions first, then transactions
-            self.conn.execute(
-                "DELETE FROM tx_events WHERE tx_id IN "
-                "(SELECT tx_id FROM transactions WHERE start_ns < ?)",
-                (cutoff,),
-            )
-            self.conn.execute("DELETE FROM transactions WHERE start_ns < ?", (cutoff,))
-            self.conn.execute("COMMIT")
+            while True:
+                if time.monotonic() >= deadline:
+                    hit_budget = True
+                    break
+                deleted = 0
+                self.conn.execute("BEGIN")
+                try:
+                    # events/flows both carry an index on timestamp_ns, so the
+                    # subquery seeks straight to the old rows and the outer
+                    # DELETE removes them by primary key.
+                    for table in ("events", "flows"):
+                        cur = self.conn.execute(
+                            f"DELETE FROM {table} WHERE id IN "
+                            f"(SELECT id FROM {table} WHERE timestamp_ns < ? LIMIT ?)",
+                            (cutoff, PRUNE_ROW_BATCH),
+                        )
+                        deleted += cur.rowcount
+                    # tx_events has no index on timestamp_ns alone (only
+                    # composites led by event_type/peer_id), so pruning it by
+                    # its own timestamp would table-scan. Select the expired
+                    # transactions via idx_tx_start instead and delete their
+                    # tx_events by tx_id via idx_txe_txid.
+                    tx_ids = [
+                        row[0]
+                        for row in self.conn.execute(
+                            "SELECT tx_id FROM transactions WHERE start_ns < ? LIMIT ?",
+                            (cutoff, PRUNE_TX_BATCH),
+                        )
+                    ]
+                    if tx_ids:
+                        placeholders = ",".join("?" * len(tx_ids))
+                        cur = self.conn.execute(
+                            f"DELETE FROM tx_events WHERE tx_id IN ({placeholders})",
+                            tx_ids,
+                        )
+                        deleted += cur.rowcount
+                        cur = self.conn.execute(
+                            f"DELETE FROM transactions WHERE tx_id IN ({placeholders})",
+                            tx_ids,
+                        )
+                        deleted += cur.rowcount
+                    self.conn.execute("COMMIT")
+                except Exception:
+                    try:
+                        self.conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
+                total += deleted
+                if deleted == 0:
+                    break  # nothing older than the cutoff remains
             # Checkpoint and truncate the WAL so the pages freed by the DELETEs
             # above are reclaimed and the WAL file cannot grow without bound.
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as e:
-            try:
-                self.conn.execute("ROLLBACK")
-            except Exception:
-                pass
             print(f"[db] prune error: {e}")
+        if hit_budget:
+            print(f"[db] prune: deleted {total:,} rows, backlog remains "
+                  f"(hit {time_budget_s:.0f}s budget)", flush=True)
+        return total
 
     def optimize(self):
         """Run PRAGMA optimize for query planner."""

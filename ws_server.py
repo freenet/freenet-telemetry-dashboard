@@ -2837,7 +2837,8 @@ async def load_initial_state():
     history_stored = 0
     history_eligible = 0
     now_ns = int(time.time() * 1_000_000_000)
-    # In-memory deque only keeps last 2 hours; DB keeps 7 days.
+    # In-memory deque only keeps last 2 hours; the DB keeps
+    # telemetry_db.DEFAULT_RETENTION_NS (24 hours).
     # When resuming from offset, always store to DB (new data since last run).
     memory_cutoff = now_ns - MAX_HISTORY_AGE_NS
     has_db = resume_offset > 0
