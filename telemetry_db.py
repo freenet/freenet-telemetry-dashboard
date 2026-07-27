@@ -11,13 +11,15 @@ Duplicate events may occur if the server crashes mid-ingest before storing the
 byte offset; this is benign for visualization purposes.
 """
 
+import os
 import sqlite3
 import time
 
 import orjson
 
-# Default DB path alongside ws_server.py
-DEFAULT_DB_PATH = "/var/www/freenet-dashboard/telemetry.db"
+# Overridable to run against a scratch database in local development.
+DEFAULT_DB_PATH = os.environ.get(
+    "FREENET_DASHBOARD_DB", "/var/www/freenet-dashboard/telemetry.db")
 
 # Keep 24 hours of data by default. The telemetry firehose scales with the peer
 # count, and the network doubled in two days (2026-07-26), which put the DB at
