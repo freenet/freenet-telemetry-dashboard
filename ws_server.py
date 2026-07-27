@@ -196,6 +196,14 @@ HISTORY_EVENT_TYPES = {
     # Contract operations
     "put_request", "put_success",
     "get_request", "get_success", "get_not_found", "get_failure",
+    # get_terminal carries the CLIENT-FACING outcome of a GET (success /
+    # not_found / timeout_exhausted) plus is_sub_op, attempts, elapsed_ms and
+    # hop_count. Without it the DB cannot answer "are GETs working": the
+    # get_request/get_not_found events are emitted per HOP, so their ratio
+    # tracks route length rather than user-visible success, and
+    # transactions.status is not a measured outcome either (see the comment on
+    # tx status assignment below). Low volume — roughly 900/hour network-wide.
+    "get_terminal",
     "update_request", "update_success", "update_failure",
     "subscribe_request", "subscribe_success", "subscribe_not_found",
     # Update propagation
@@ -1248,6 +1256,15 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
         return  # Skip noisy transaction types
 
     # Create or update transaction
+    #
+    # WARNING: "status" is NOT a measured operation outcome, and must not be
+    # read as one. "complete" here is a FALLBACK for any transaction whose
+    # first observed event simply isn't a start event — which is the common
+    # case for propagation events (every update_broadcast_received mints a
+    # "complete" update tx). SUBSCRIBE has no terminal handler at all, so its
+    # transactions stay "pending" forever. Computing a success rate from this
+    # column produces confident, badly wrong numbers. For real client-facing
+    # GET outcomes use the get_terminal event (outcome / is_sub_op / attempts).
     if tx_id not in transactions:
         transactions[tx_id] = {
             "op": op_type or "unknown",
