@@ -1957,6 +1957,18 @@ def process_record(record, store_history=True):
     if state_hash_after:
         event["state_hash_after"] = state_hash_after
 
+    # Include the client-facing GET outcome. get_terminal is the only event
+    # reporting what the requesting client actually saw, and its diagnostic
+    # fields live in the body, so they have to be copied out explicitly —
+    # otherwise the stored row is indistinguishable from any other GET event
+    # and storing it buys nothing. Tested against `is_sub_op: false` and
+    # `attempts: 0`, so the guard is `is not None` rather than truthiness.
+    if event_type == "get_terminal":
+        for _field in ("outcome", "is_sub_op", "attempts", "elapsed_ms",
+                       "hop_count", "streamed"):
+            if body.get(_field) is not None:
+                event[_field] = body[_field]
+
     # Include transaction ID for timeline lanes
     if tx_id and tx_id != "00000000000000000000000000":
         event["tx_id"] = tx_id
