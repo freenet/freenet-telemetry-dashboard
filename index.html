@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=20260701a">
+    <link rel="stylesheet" href="css/styles.css?v=20260726k">
     <script>
         // Apply saved theme before render to avoid flash of wrong theme.
         // Wrapped in try/catch because localStorage throws in Safari private browsing.
@@ -155,6 +155,7 @@
                             <button class="panel-tab" id="tab-performance" onclick="switchRightTab('performance')">Performance</button>
                             <button class="panel-tab" id="tab-versions" onclick="switchRightTab('versions')">Versions</button>
                             <button class="panel-tab" id="tab-resources" onclick="switchRightTab('resources')">Resources</button>
+                            <button class="panel-tab" id="tab-checks" onclick="switchRightTab('checks')">Checks</button>
                         </div>
                     </div>
                     <div id="contracts-panel-content">
@@ -195,6 +196,14 @@
                             <div class="empty-state">
                                 <div class="empty-state-icon">&#128190;</div>
                                 <div>Loading resource data...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="checks-panel-content" class="performance-panel" style="display: none;">
+                        <div class="checks-container" id="checks-container">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">&#129522;</div>
+                                <div>Loading network checks...</div>
                             </div>
                         </div>
                     </div>
@@ -263,6 +272,6 @@
     </div>
 
 
-    <script type="module" src="js/app.js?v=20260701a"></script>
+    <script type="module" src="js/app.js?v=20260726a"></script>
 </body>
 </html>

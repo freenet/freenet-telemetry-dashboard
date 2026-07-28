@@ -322,13 +322,15 @@ export function loadFromURL(updateView) {
         }
     }
 
-    // Restore right panel tab
+    // Restore right panel tab. updateURL() writes whichever tab is open, so
+    // restoring only 'performance' silently dropped every other one: a
+    // shared link to Versions, Resources or Checks landed back on Contracts.
     const tabParam = params.get('tab');
-    if (tabParam === 'performance') {
-        state.rightPanelTab = 'performance';
+    if (['performance', 'versions', 'resources', 'checks'].includes(tabParam)) {
+        state.rightPanelTab = tabParam;
         // Defer tab switch to after DOM is ready
         setTimeout(() => {
-            if (window.switchRightTab) window.switchRightTab('performance');
+            if (window.switchRightTab) window.switchRightTab(tabParam);
         }, 0);
     }
 

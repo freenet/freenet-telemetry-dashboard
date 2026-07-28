@@ -6,6 +6,7 @@
 import { state } from './state.js';
 import { addTransferEvents, addTransferEvent } from './transfers.js';
 import { setPeerResources, updatePeerResource } from './resources.js';
+import { setChecks, applyCheckEvent } from './checks.js';
 import { formatLatency, getRateClass, indexEventForActivity, clearActivityIndex, rebuildActivityIndex } from './utils.js';
 
 /**
@@ -202,6 +203,13 @@ function handleMessage(data, callbacks) {
             console.log('Peer resources:', Object.keys(data.peer_resources).length);
         }
 
+        // Load synthetic network check results (#4665)
+        if (data.checks) {
+            setChecks(data.checks);
+            console.log('Network checks:', data.checks.runs.length, 'runs,',
+                        data.checks.scenarios.length, 'scenario(s)');
+        }
+
         // Store peer and connection data
         if (data.peers) {
             state.initialStatePeers = data.peers;
@@ -300,6 +308,9 @@ function handleMessage(data, callbacks) {
     } else if (data.type === 'resource') {
         // Real-time per-node resource-utilization sample (#4642 A1)
         updatePeerResource(data);
+    } else if (data.type === 'check') {
+        // Real-time synthetic check result (#4665)
+        applyCheckEvent(data);
     } else if (data.type === 'peer_name_update') {
         state.peerNames[data.ip_hash] = data.name;
         console.log(`Peer ${data.ip_hash} named: ${data.name}${data.was_modified ? ' (adjusted)' : ''}`);
