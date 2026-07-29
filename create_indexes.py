@@ -16,7 +16,7 @@ import sys
 import time
 import sqlite3
 
-from telemetry_db import DEFAULT_DB_PATH, SCHEMA_INDEXES
+from telemetry_db import DEFAULT_DB_PATH, SCHEMA_INDEXES, SCHEMA_TABLES
 
 
 def main():
@@ -28,6 +28,13 @@ def main():
     conn.execute("PRAGMA cache_size=-1048576")  # 1GB cache for index build
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA busy_timeout=60000")
+
+    # Create any missing tables first. This script runs while the server is
+    # stopped, so on a database predating a new table (get_terminals, issue
+    # #15) nothing else would have created it, and the index statement below
+    # would fail with "no such table" and abort every index after it.
+    # CREATE TABLE IF NOT EXISTS makes this a no-op in the normal case.
+    conn.executescript(SCHEMA_TABLES)
 
     # Show existing indexes
     existing = set()

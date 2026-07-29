@@ -155,3 +155,74 @@ class TestInvariants:
         shapes = {tx["tx_shape"] for tx in srv.transactions.values()}
         assert "complete" not in shapes
         assert "pending" not in shapes
+
+
+class TestLateHopEventsDoNotDemoteASettledTransaction:
+    """`get_request` is per-HOP, so a relay's request can legitimately arrive
+    after the originator's terminal. Dropping the `tx_shape == "partial"` guard
+    survived the whole suite, yet it lets a late start flip a settled
+    transaction back to 'open' while leaving its outcome in place — which
+    violates the invariant that an outcome implies settled."""
+
+    def test_a_late_start_does_not_reopen_a_settled_transaction(self, srv):
+        track(srv, "get_request", "tx-1", ts=100)
+        track(srv, "get_terminal", "tx-1", ts=200, terminal_outcome="success")
+        tx = track(srv, "get_request", "tx-1", ts=300)
+        assert tx["tx_shape"] == "settled", "a late per-hop request reopened a settled tx"
+        assert tx["outcome"] == "success"
+
+    def test_the_invariant_holds_under_reordering(self, srv):
+        for i, et in enumerate(["get_terminal", "get_request", "get_request"]):
+            srv.track_transaction("tx-2", et, 100 + i, "peer-a",
+                                  terminal_outcome="not_found" if et == "get_terminal" else None)
+        tx = srv.transactions["tx-2"]
+        assert tx["outcome"] is None or tx["tx_shape"] == "settled"
+
+    @pytest.mark.parametrize("start_event", ["subscribe_request", "put_request",
+                                             "update_request"])
+    def test_holds_for_every_op(self, srv, start_event):
+        op = start_event.split("_")[0]
+        terminal = {"subscribe": "subscribe_success", "put": "put_success",
+                    "update": "update_success"}[op]
+        track(srv, start_event, "tx-3", ts=100)
+        track(srv, terminal, "tx-3", ts=200)
+        tx = track(srv, start_event, "tx-3", ts=300)
+        assert tx["tx_shape"] == "settled"
+
+
+class TestContradictoryTerminalsAreResolvedDeterministically:
+    """SUBSCRIBE/PUT/UPDATE terminals are minted per hop, and one client
+    subscribe can emit both subscribe_not_found and subscribe_success. Under
+    last-write-wins the stored outcome depended on collector ingest order."""
+
+    def test_success_wins_regardless_of_arrival_order(self, srv):
+        track(srv, "subscribe_request", "tx-a", ts=100)
+        track(srv, "subscribe_not_found", "tx-a", ts=200)
+        tx = track(srv, "subscribe_success", "tx-a", ts=300)
+        assert tx["outcome"] == "success"
+
+        track(srv, "subscribe_request", "tx-b", ts=100)
+        track(srv, "subscribe_success", "tx-b", ts=200)
+        tx = track(srv, "subscribe_not_found", "tx-b", ts=300)
+        assert tx["outcome"] == "success", "outcome depended on ingest order"
+
+    def test_repeated_hop_terminals_are_stable(self, srv):
+        track(srv, "subscribe_request", "tx-c", ts=100)
+        for i in range(4):  # a 4-hop subscribe emits four
+            track(srv, "subscribe_success", "tx-c", ts=200 + i)
+        assert srv.transactions["tx-c"]["outcome"] == "success"
+
+    def test_a_client_terminal_is_not_overridden_by_a_hop_terminal(self, srv):
+        """GET's client-facing verdict is authoritative."""
+        track(srv, "get_request", "tx-d", ts=100)
+        track(srv, "get_terminal", "tx-d", ts=200, terminal_outcome="timeout_exhausted")
+        tx = track(srv, "put_success", "tx-d", ts=300)
+        assert tx["outcome"] == "timeout_exhausted", (
+            "a hop-observed terminal overwrote the client-facing outcome"
+        )
+
+    def test_a_client_terminal_overrides_an_earlier_hop_terminal(self, srv):
+        track(srv, "subscribe_request", "tx-e", ts=100)
+        track(srv, "subscribe_not_found", "tx-e", ts=200)
+        tx = track(srv, "get_terminal", "tx-e", ts=300, terminal_outcome="success")
+        assert tx["outcome"] == "success"

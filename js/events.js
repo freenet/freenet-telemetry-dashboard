@@ -399,7 +399,7 @@ export function classifyTxEvent(eventType) {
     if (eventType.startsWith('put_')) return { op: 'put', role: null };
     if (eventType.startsWith('get_')) return { op: 'get', role: null };
     if (eventType.startsWith('update_')) return { op: 'update', role: null };
-    if (eventType.startsWith('subscribe') || eventType === 'unsubscribed') return { op: 'subscribe', role: null };
+    if (eventType.startsWith('subscribe')) return { op: 'subscribe', role: null };
     if (eventType.startsWith('connect')) return { op: 'connect', role: null };
     if (eventType.includes('broadcast')) return { op: 'broadcast', role: null };
     return { op: eventType.split('_')[0] || 'other', role: null };

@@ -53,26 +53,60 @@ def test_terminal_events_match():
     assert js == py
 
 
-@pytest.mark.parametrize("event_type", [
-    "get_request", "get_success", "get_not_found", "get_terminal",
-    "subscribe_request", "subscribe_success", "subscribe_not_found",
-    "subscribe_timeout", "subscribed",
-    "put_request", "put_success", "update_request", "update_success",
-    "update_broadcast_received", "connect_connected", "disconnect",
-])
-def test_classification_agrees_for_every_event_the_dashboard_sees(event_type):
-    """Cross-check the Python classifier against the JS tables."""
-    op, role = ws_server.classify_tx_event(event_type)
+def js_classify(event_type):
+    """Evaluate js/events.js's classifyTxEvent fallback chain in Python.
+
+    Parsed out of the source rather than reimplemented, so the two cannot drift
+    without this failing.
+    """
     js_start = parse_js_object("TX_START_EVENTS")
     js_terminal = parse_js_object("TX_TERMINAL_EVENTS")
     if event_type in js_start:
-        assert (op, role) == (js_start[event_type], "start")
-    elif event_type in js_terminal:
-        assert (op, role) == (js_terminal[event_type][0], "terminal")
-    elif event_type == "get_terminal":
-        assert (op, role) == ("get", "terminal")
-    else:
-        assert role is None
+        return js_start[event_type], "start"
+    if event_type in js_terminal:
+        return js_terminal[event_type][0], "terminal"
+    src = js_source()
+    body = re.search(r"export function classifyTxEvent\(eventType\) \{(.*?)\n\}",
+                     src, re.S).group(1)
+    for line in body.splitlines():
+        m = re.search(
+            r"if \((.*?)\) return \{ op: '([a-z]+)', role: (null|'[a-z]+') \};", line)
+        if not m:
+            continue
+        cond, op, role = m.group(1), m.group(2), m.group(3)
+        role = None if role == "null" else role.strip("'")
+        for pat in re.findall(r"eventType\.startsWith\('([^']+)'\)", cond):
+            if event_type.startswith(pat):
+                return op, role
+        for pat in re.findall(r"eventType\.includes\('([^']+)'\)", cond):
+            if pat in event_type:
+                return op, role
+        for lit in re.findall(r"eventType === '([^']+)'", cond):
+            if event_type == lit:
+                return op, role
+    return event_type.split("_")[0] or "other", None
+
+
+@pytest.mark.parametrize("event_type", [
+    "get_request", "get_success", "get_not_found", "get_terminal",
+    "subscribe_request", "subscribe_success", "subscribe_not_found",
+    "subscribe_timeout", "subscribed", "unsubscribed",
+    "put_request", "put_success", "put_failure",
+    "update_request", "update_success", "update_failure",
+    "update_broadcast_received", "update_broadcast_applied", "broadcast_emitted",
+    "connect_connected", "connect_rejected", "connect_request_sent", "disconnect",
+    "seeding_started", "peer_startup", "transfer_completed", "hosting_started",
+])
+def test_classification_agrees_for_every_event_the_dashboard_sees(event_type):
+    """Compare BOTH op and role.
+
+    Asserting only `role is None` for anything outside the two tables left the
+    test structurally blind to op-level drift, and a fix that touched only the
+    Python side went unnoticed because of it: `unsubscribed` classified as
+    'unsubscribed' on the server and 'subscribe' in the client, which decides
+    whether the event creates a transaction at all.
+    """
+    assert ws_server.classify_tx_event(event_type) == js_classify(event_type)
 
 
 class TestTheClientNoLongerCarriesTheOldSemantics:

@@ -179,10 +179,19 @@ class TestOperationStatsPanel:
         assert series_of(srv)["get_rate"] == 100.0
 
 
-class TestSubscribeStatsAreNoLongerPinnedAtZero:
-    def test_subscribe_success_is_counted(self, srv):
-        """op_stats and sub_ok both keyed on `subscribed`, which is never
-        emitted, so every subscribe counter read zero."""
+class TestSubscribeHasNoSuccessRate:
+    """issue #15 follow-up: SUBSCRIBE has no client-facing terminal event.
+
+    The core emits GetEvent::ClientTerminal at the client boundary, but there is
+    no equivalent on SubscribeEvent. subscribe_success is minted at every peer
+    on the response path (register.rs, on SubscribeMsg::Response, with the
+    comment noting hop_count is "preserved by relays bubbling up"), so a 4-hop
+    subscribe emits four. Their ratio therefore weights by hop count — the same
+    defect that made GET read 0.05% against a real 87%. No arithmetic fixes it,
+    so the counts ship without a rate.
+    """
+
+    def test_no_subscribe_success_rate_is_published(self, srv):
         t = time.time_ns()
         for i in range(8):
             feed(srv, "subscribe_request", t + i, tx_id=f"s-{i}")
@@ -192,18 +201,103 @@ class TestSubscribeStatsAreNoLongerPinnedAtZero:
             feed(srv, "subscribe_not_found", t + 200 + i, tx_id=f"s-{6 + i}")
 
         stats = srv.get_operation_stats()["subscribe"]
-        assert stats["total"] == 8
-        assert stats["success_rate"] == 75.0
-        assert stats["not_found"] == 2
-        assert series_of(srv)["sub_n"] == 8
-        assert series_of(srv)["sub_rate"] == 75.0
+        assert "success_rate" not in stats, (
+            "a rate over per-hop counters is issue #15 with a new name"
+        )
+        assert "sub_rate" not in series_of(srv)
 
-    def test_subscribe_timeout_counts_as_a_failure(self, srv):
+    def test_counters_are_named_so_they_cannot_be_read_as_outcomes(self, srv):
         t = time.time_ns()
-        for i in range(5):
-            feed(srv, "subscribe_success", t + i, tx_id=f"s-{i}")
-        for i in range(5):
-            feed(srv, "subscribe_timeout", t + 100 + i, tx_id=f"t-{i}")
+        for i in range(8):
+            feed(srv, "subscribe_request", t + i, tx_id=f"s-{i}")
+        for i in range(6):
+            feed(srv, "subscribe_success", t + 100 + i, tx_id=f"s-{i}")
+        for i in range(2):
+            feed(srv, "subscribe_not_found", t + 200 + i, tx_id=f"s-{6 + i}")
+        feed(srv, "subscribe_timeout", t + 300, tx_id="s-9")
+
         stats = srv.get_operation_stats()["subscribe"]
-        assert stats["timeouts"] == 5
-        assert stats["success_rate"] == 50.0
+        assert stats == {
+            "hop_requests": 8, "hop_successes": 6,
+            "hop_not_found": 2, "hop_timeouts": 1,
+        }
+        # Every exposed key must carry the hop caveat in its name.
+        assert all(k.startswith("hop_") for k in stats)
+
+    def test_hop_counts_are_still_reported_in_the_series(self, srv):
+        t = time.time_ns()
+        for i in range(6):
+            feed(srv, "subscribe_success", t + i, tx_id=f"s-{i}")
+        for i in range(2):
+            feed(srv, "subscribe_not_found", t + 100 + i, tx_id=f"n-{i}")
+        point = series_of(srv)
+        assert point["sub_hops_ok"] == 6
+        assert point["sub_hops_bad"] == 2
+
+    def test_subscribe_events_are_still_counted_at_all(self, srv):
+        """The original defect was counters pinned at zero because they keyed
+        on `subscribed`, which the core never emits. Dropping the rate must not
+        reintroduce that."""
+        t = time.time_ns()
+        for i in range(6):
+            feed(srv, "subscribe_success", t + i, tx_id=f"s-{i}")
+        assert srv.get_operation_stats()["subscribe"]["hop_successes"] == 6
+
+
+class TestPrecomputeRebuildsEveryOutcome:
+    """The post-restart path rebuilds what the dashboard shows most of the time.
+
+    Mutating `ok = outcome == "success"` to `ok = True` in
+    precompute_metrics_from_db survived the whole suite, because every existing
+    test fed it only outcome='success' at is_sub_op=0.
+    """
+
+    def feed_and_rebuild(self, srv, samples):
+        t = time.time_ns()
+        for i, (outcome, sub) in enumerate(samples):
+            feed(srv, "get_terminal", t + i, tx_id=f"g-{i}",
+                 outcome=outcome, is_sub_op=sub)
+        srv.db.flush()
+        srv.metrics_buckets.clear()
+        srv._current_bucket = None
+        srv.precompute_metrics_from_db()
+        return srv.get_metrics_timeseries()["series"][-1]
+
+    def test_rebuild_distinguishes_success_from_failure(self, srv):
+        point = self.feed_and_rebuild(srv, (
+            [("success", False)] * 7
+            + [("not_found", False)] * 2
+            + [("timeout_exhausted", False)] * 1
+        ))
+        assert point["get_rate"] == 70.0, "non-success outcomes were counted as success"
+        assert point["get_n"] == 10
+
+    def test_rebuild_keeps_sub_ops_separate(self, srv):
+        point = self.feed_and_rebuild(srv, (
+            [("success", False)] * 6
+            + [("timeout_exhausted", True)] * 8
+            + [("success", True)] * 2
+        ))
+        assert point["get_rate"] == 100.0, "direct GETs were healthy"
+        assert point["get_sub_rate"] == 20.0, "sub-op failures must survive a restart"
+        assert point["get_n"] == 6
+        assert point["get_sub_n"] == 10
+
+    def test_rebuild_matches_the_live_path(self, srv):
+        """Whatever the restart shows must equal what was shown before it."""
+        samples = ([("success", False)] * 5 + [("not_found", False)] * 3
+                   + [("success", True)] * 4 + [("timeout_exhausted", True)] * 6)
+        t = time.time_ns()
+        for i, (outcome, sub) in enumerate(samples):
+            feed(srv, "get_terminal", t + i, tx_id=f"g-{i}",
+                 outcome=outcome, is_sub_op=sub)
+        live = srv.get_metrics_timeseries()["series"][-1]
+
+        srv.db.flush()
+        srv.metrics_buckets.clear()
+        srv._current_bucket = None
+        srv.precompute_metrics_from_db()
+        rebuilt = srv.get_metrics_timeseries()["series"][-1]
+
+        for key in ("get_rate", "get_sub_rate", "get_n", "get_sub_n"):
+            assert live[key] == rebuilt[key], f"{key} changed across a restart"

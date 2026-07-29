@@ -9,7 +9,23 @@ def columns(conn, table):
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-class TestMigrationFromTheOldStatusColumn:
+class TestAdditiveOnlyMigration:
+    """issue #15 follow-up: the migration is purely additive.
+
+    `status` is left in place and untouched, the two new columns are appended
+    beside it, and no row is rewritten. That keeps a rollback to pre-#16 code
+    working, which matters because flush() batches every table into one
+    transaction and _try_flush disables the DB permanently on error — a missing
+    column would silently stop ALL ingest, not just transactions.
+    """
+
+    LEGACY_ROWS = [
+        ("t1", "update", "complete"),    # phantom, minted by a propagation event
+        ("t2", "subscribe", "pending"),  # never settled: wrong terminal name
+        ("t3", "get", "success"),        # per-HOP verdict, not a client outcome
+        ("t4", "get", "not_found"),      # per-HOP verdict, not a client outcome
+    ]
+
     def make_legacy_db(self, path):
         conn = sqlite3.connect(path)
         conn.executescript("""
@@ -20,31 +36,49 @@ class TestMigrationFromTheOldStatusColumn:
                 event_count INTEGER DEFAULT 0
             );
         """)
-        rows = [
-            ("t1", "update", "complete"),   # phantom: propagation event
-            ("t2", "subscribe", "pending"),  # never settled, wrong terminal name
-            ("t3", "get", "success"),        # genuinely measured
-            ("t4", "get", "not_found"),      # genuinely measured
-        ]
         conn.executemany(
             "INSERT INTO transactions (tx_id, op, start_ns, status) VALUES (?, ?, 1, ?)",
-            rows)
+            self.LEGACY_ROWS)
         conn.commit()
         conn.close()
 
-    def test_status_is_renamed_and_outcome_added(self, tmp_path):
+    def test_status_survives_so_a_rollback_still_works(self, tmp_path):
         p = str(tmp_path / "legacy.db")
         self.make_legacy_db(p)
         db = TelemetryDB(p)
         db.open()
         try:
             cols = columns(db.conn, "transactions")
-            assert "status" not in cols, "the misleading column name must be gone"
+            assert "status" in cols, "dropping `status` breaks rollback to pre-#16 code"
             assert {"tx_shape", "outcome"} <= cols
+            # An old writer's INSERT names `status` explicitly; it must still work.
+            db.conn.execute(
+                "INSERT INTO transactions (tx_id, op, contract_key, contract_short, "
+                "start_ns, end_ns, status, duration_ms, event_count) "
+                "VALUES ('old', 'get', NULL, NULL, 1, 2, 'pending', 1.0, 1)")
         finally:
             db.close()
 
-    def test_legacy_values_are_reinterpreted_honestly(self, tmp_path):
+    def test_no_legacy_row_is_rewritten(self, tmp_path):
+        p = str(tmp_path / "legacy.db")
+        self.make_legacy_db(p)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            got = dict(db.conn.execute("SELECT tx_id, status FROM transactions"))
+        finally:
+            db.close()
+        assert got == {t: s for t, _, s in self.LEGACY_ROWS}, \
+            "legacy values must be preserved, not reinterpreted in place"
+
+    def test_legacy_rows_report_unclassified_not_a_fabricated_outcome(self, tmp_path):
+        """`partial` honestly means "we have not classified this row".
+
+        t3/t4 matter most: their legacy `status` came from get_success /
+        get_not_found, which are per-HOP. Promoting those into `outcome` would
+        put a relay's local verdict into a column documented as a client-facing
+        result — the very confusion issue #15 is about.
+        """
         p = str(tmp_path / "legacy.db")
         self.make_legacy_db(p)
         db = TelemetryDB(p)
@@ -52,48 +86,13 @@ class TestMigrationFromTheOldStatusColumn:
         try:
             got = dict(
                 (r[0], (r[1], r[2]))
-                for r in db.conn.execute("SELECT tx_id, tx_shape, outcome FROM transactions")
+                for r in db.conn.execute(
+                    "SELECT tx_id, tx_shape, outcome FROM transactions")
             )
         finally:
             db.close()
-        # 'complete' was never evidence of a terminal, so it degrades to partial
-        # rather than being promoted to a settled result.
-        assert got["t1"] == ("partial", None)
-        assert got["t2"] == ("open", None)
-        assert got["t3"] == ("settled", "success")
-        assert got["t4"] == ("settled", "not_found")
-
-    def test_migration_runs_once_and_is_recorded(self, tmp_path):
-        """The legacy rewrite scans a table with millions of rows, so it must
-        not run again on every restart."""
-        p = str(tmp_path / "legacy.db")
-        self.make_legacy_db(p)
-        db = TelemetryDB(p)
-        db.open()
-        try:
-            assert db.conn.execute("PRAGMA user_version").fetchone()[0] == \
-                TelemetryDB.SCHEMA_VERSION
-        finally:
-            db.close()
-
-        # Plant a value the migration WOULD rewrite. If it survives the next
-        # open, the rewrite genuinely did not run again. (A sentinel the
-        # migration ignores would survive either way and prove nothing.)
-        db = TelemetryDB(p)
-        db.open()
-        try:
-            db.conn.execute(
-                "UPDATE transactions SET tx_shape = 'complete' WHERE tx_id = 't1'")
-        finally:
-            db.close()
-        db = TelemetryDB(p)
-        db.open()
-        try:
-            shape = db.conn.execute(
-                "SELECT tx_shape FROM transactions WHERE tx_id='t1'").fetchone()[0]
-            assert shape == "complete", "migration re-ran after it was recorded"
-        finally:
-            db.close()
+        for tx_id in ("t1", "t2", "t3", "t4"):
+            assert got[tx_id] == ("partial", None), tx_id
 
     def test_migration_is_idempotent(self, tmp_path):
         p = str(tmp_path / "legacy.db")
@@ -105,25 +104,37 @@ class TestMigrationFromTheOldStatusColumn:
         db = TelemetryDB(p)
         db.open()
         try:
-            assert columns(db.conn, "transactions") >= {"tx_shape", "outcome"}
-            n = db.conn.execute(
-                "SELECT COUNT(*) FROM transactions WHERE tx_shape IN "
-                "('pending','complete','success','not_found')").fetchone()[0]
-            assert n == 0
+            assert columns(db.conn, "transactions") >= {"status", "tx_shape", "outcome"}
+            assert dict(db.conn.execute("SELECT tx_id, status FROM transactions")) == \
+                {t: s for t, _, s in self.LEGACY_ROWS}
         finally:
             db.close()
 
-    def test_fresh_database_has_the_new_schema(self, tmp_path):
+    def test_new_writes_use_the_new_columns_only(self, tmp_path):
+        """Nothing writes `status` any more; it is inert, not dual-written."""
+        p = str(tmp_path / "legacy.db")
+        self.make_legacy_db(p)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            db.upsert_transaction("new", "get", None, None, 1, 2,
+                                  "settled", "success", 1.0, 2)
+            db.flush()
+            row = db.conn.execute(
+                "SELECT status, tx_shape, outcome FROM transactions WHERE tx_id='new'"
+            ).fetchone()
+            assert row == ("pending", "settled", "success")
+        finally:
+            db.close()
+
+    def test_fresh_database_has_every_table_and_column(self, tmp_path):
         db = TelemetryDB(str(tmp_path / "fresh.db"))
         db.open()
         try:
-            cols = columns(db.conn, "transactions")
-            assert "status" not in cols
-            assert {"tx_shape", "outcome"} <= cols
-            assert "get_terminals" in {
-                r[0] for r in db.conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'")
-            }
+            assert {"status", "tx_shape", "outcome"} <= columns(db.conn, "transactions")
+            tables = {r[0] for r in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "get_terminals" in tables
         finally:
             db.close()
 

@@ -19,6 +19,9 @@ from pathlib import Path
 
 import orjson
 
+import ws_server
+from telemetry_db import SCHEMA_TABLES
+
 TELEMETRY_LOG = Path("/mnt/media/freenet-telemetry/logs.jsonl")
 DB_PATH = "/var/www/freenet-dashboard/telemetry.db"
 
@@ -44,26 +47,16 @@ HISTORY_EVENT_TYPES = {
 
 TRACKED_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
 
-# Must mirror TX_START_EVENTS / TX_TERMINAL_EVENTS in ws_server.py. get_success
-# and get_not_found are per-HOP and so are NOT terminals; get_terminal is the
-# client-facing GET outcome and is handled inline (its result is in the body).
-TX_START_EVENTS = {
-    "put_request", "get_request", "update_request",
-    "subscribe_request", "connect_request_sent",
-}
-TX_TERMINAL_EVENTS = {
-    "put_success": "success",
-    "put_failure": "failure",
-    "update_success": "success",
-    "update_failure": "failure",
-    "subscribe_success": "success",
-    "subscribe_not_found": "not_found",
-    "subscribe_timeout": "timeout",
-    "subscribed": "success",  # legacy alias, no longer emitted
-    "connect_connected": "success",
-    "connect_rejected": "rejected",
-    "disconnect": "disconnected",
-}
+# Imported rather than copied. This script previously kept its own transcription
+# of the classification tables and drifted from the server twice: it keyed
+# subscribes off `subscribed` (an event the core never emits) and recorded
+# get_not_found as "success". Sharing the definitions makes that class of bug
+# unrepresentable. get_success/get_not_found are per-HOP and so are not
+# terminals; get_terminal is the client-facing GET outcome and is handled
+# inline, because its result lives in the event body.
+TX_START_EVENTS = set(ws_server.TX_START_EVENTS)
+TX_TERMINAL_EVENTS = {k: v[1] for k, v in ws_server.TX_TERMINAL_EVENTS.items()}
+outcome_wins = ws_server.outcome_wins
 
 PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)')
 
@@ -146,51 +139,16 @@ def main():
     conn.execute("PRAGMA cache_size=-256000")  # 256MB cache
     conn.execute("PRAGMA temp_store=MEMORY")
 
-    # Create tables without indexes (add after bulk insert)
-    conn.executescript("""
-        CREATE TABLE events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ns INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            peer_id TEXT,
-            tx_id TEXT,
-            contract_key TEXT,
-            data TEXT NOT NULL
-        );
-        CREATE TABLE transactions (
-            tx_id TEXT PRIMARY KEY,
-            op TEXT NOT NULL,
-            contract_key TEXT,
-            contract_short TEXT,
-            start_ns INTEGER NOT NULL,
-            end_ns INTEGER,
-            tx_shape TEXT DEFAULT 'partial',
-            outcome TEXT,
-            duration_ms REAL,
-            event_count INTEGER DEFAULT 0
-        );
-        CREATE TABLE tx_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tx_id TEXT NOT NULL,
-            timestamp_ns INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            peer_id TEXT
-        );
-        CREATE TABLE flows (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ns INTEGER NOT NULL,
-            from_peer TEXT NOT NULL,
-            to_peer TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            tx_id TEXT
-        );
-        CREATE TABLE meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-    """)
+    # Tables come from the server's own schema rather than a transcription of
+    # it. The previous hand-copy silently omitted get_terminals, which is where
+    # GET success rates are sourced from — so a database rebuilt by this script
+    # produced a Performance chart with PUT and UPDATE restored and both GET
+    # lines blank, the exact metric this work exists to fix. SCHEMA_TABLES
+    # carries no indexes; those are still added after the bulk insert.
+    conn.executescript(SCHEMA_TABLES)
 
     event_buf = []
+    getterm_buf = []
     tx_data = {}  # tx_id -> {op, contract, start_ns, end_ns, tx_shape, outcome, events}
     count = 0
     stored = 0
@@ -312,6 +270,7 @@ def main():
                                         "op": op, "contract": contract_key,
                                         "start_ns": ts, "end_ns": ts,
                                         "tx_shape": "partial", "outcome": None,
+                                        "outcome_src": None,
                                         "events": [],
                                     }
                                 tx = tx_data[tx_id]
@@ -327,14 +286,32 @@ def main():
                                 if display_type in TX_START_EVENTS:
                                     if tx["tx_shape"] == "partial":
                                         tx["tx_shape"] = "open"
-                                elif display_type in TX_TERMINAL_EVENTS:
-                                    tx["tx_shape"] = "settled"
-                                    tx["outcome"] = TX_TERMINAL_EVENTS[display_type]
-                                elif display_type == "get_terminal":
-                                    outcome = body.get("outcome")
+                                else:
+                                    if display_type in TX_TERMINAL_EVENTS:
+                                        outcome = TX_TERMINAL_EVENTS[display_type]
+                                    elif display_type == "get_terminal":
+                                        outcome = body.get("outcome")
+                                    else:
+                                        outcome = None
                                     if outcome:
                                         tx["tx_shape"] = "settled"
-                                        tx["outcome"] = outcome
+                                        # Same precedence as the server: several
+                                        # hop-observed terminals can land on one
+                                        # transaction and can contradict.
+                                        if outcome_wins(outcome, display_type,
+                                                        tx["outcome"], tx["outcome_src"]):
+                                            tx["outcome"] = outcome
+                                            tx["outcome_src"] = display_type
+
+                        # Project the client-facing GET outcome, the source the
+                        # server computes GET success rates from.
+                        if display_type == "get_terminal" and body.get("outcome"):
+                            getterm_buf.append((
+                                ts, tx_id, peer_id, contract_key,
+                                body["outcome"], 1 if body.get("is_sub_op") else 0,
+                                body.get("attempts"), body.get("hop_count"),
+                                body.get("elapsed_ms"),
+                            ))
 
                         stored += 1
 
@@ -366,7 +343,18 @@ def main():
         )
         conn.execute("COMMIT")
 
+    if getterm_buf:
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO get_terminals (timestamp_ns, tx_id, peer_id, contract_key, "
+            "outcome, is_sub_op, attempts, hop_count, elapsed_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            getterm_buf,
+        )
+        conn.execute("COMMIT")
+
     print(f"\n  Events: {stored:,} stored")
+    print(f"  GET terminals: {len(getterm_buf):,} stored")
 
     # Insert transactions and tx_events
     print("  Writing transactions and computing flows...")
