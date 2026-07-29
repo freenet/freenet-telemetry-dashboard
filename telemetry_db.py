@@ -196,14 +196,24 @@ SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id)",
     "CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_txe_peer_ts ON tx_events(peer_id, event_type, timestamp_ns)",
-    # get_terminals deliberately has NO index. Measured on a full 24h window
-    # (250k rows): the startup aggregate in get_terminal_buckets takes 382ms
-    # scanning and 799ms with an index on timestamp_ns — it groups the entire
-    # retention window, so a table scan beats index-ordered row lookups. The
-    # only query an index helps is prune's probe (65ms -> 22ms against a 5s
-    # budget). Adding one would also make correctness depend on an operator
-    # remembering to run create_indexes.py. The table is bounded by retention,
-    # so scanning is the right plan; revisit only if retention grows a lot.
+    # get_terminals deliberately has NO index on timestamp_ns, for a structural
+    # reason rather than a benchmarked one. get_terminal_buckets is called with
+    # since_ns = METRICS_MAX_AGE_NS (8 days) against a 24h retention, so its
+    # WHERE matches every row by construction, and it GROUPs BY a computed
+    # bucket expression that no timestamp_ns index can serve — the query plan
+    # keeps its temp B-tree either way. An index therefore cannot help the only
+    # query this table exists for, at any row count. It would also make
+    # correctness depend on an operator running create_indexes.py, since
+    # nothing creates indexes at startup.
+    #
+    # The cost that DOES grow is prune's probe, which scans. The trigger is GET
+    # volume rising at fixed retention, not retention changing. Measured:
+    # 250k rows 382ms aggregate / 14ms probe; 500k 977/51; 1M 2142/167. prune
+    # blocks the asyncio event loop and probes at least twice per cycle, so 1M
+    # rows is roughly a 330ms stall per cycle with nothing alarming on it.
+    # Cheap now and linear from here — but this module's own retention comment
+    # records the network doubling in two days, so revisit when get_terminals
+    # approaches ~1M rows in a window.
     "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",
@@ -283,7 +293,17 @@ class TelemetryDB:
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(transactions)")}
         if not cols:
             return  # table absent entirely; executescript above will have made it
-        for name, ddl in (("tx_shape", "TEXT DEFAULT 'partial'"), ("outcome", "TEXT")):
+        # `status` is listed so it is RESTORED on a database that already ran
+        # the superseded renaming migration. CREATE TABLE IF NOT EXISTS cannot
+        # bring back a column that was renamed away, and without it a rollback
+        # to pre-#16 code fails with "no such column: status" — which
+        # _try_flush swallows by setting _enabled = False permanently, so the
+        # process keeps running and silently stops persisting everything. The
+        # rollback safety net this whole migration exists to provide would be
+        # missing on exactly the databases that most need it.
+        for name, ddl in (("status", "TEXT DEFAULT 'pending'"),
+                          ("tx_shape", "TEXT DEFAULT 'partial'"),
+                          ("outcome", "TEXT")):
             if name not in cols:
                 self.conn.execute(
                     f"ALTER TABLE transactions ADD COLUMN {name} {ddl}")
@@ -1189,9 +1209,12 @@ class TelemetryDB:
                 deleted = 0
                 self.conn.execute("BEGIN")
                 try:
-                    # events/flows/get_terminals all carry an index on
-                    # timestamp_ns, so the subquery seeks straight to the old
-                    # rows and the outer DELETE removes them by primary key.
+                    # events and flows carry an index on timestamp_ns, so their
+                    # subquery seeks straight to the old rows and the outer
+                    # DELETE removes them by primary key. get_terminals has no
+                    # such index (see SCHEMA_INDEXES) so its probe scans; that
+                    # is affordable only while retention keeps the table small,
+                    # and it is the cost that grows if GET volume rises.
                     for table in ("events", "flows", "get_terminals"):
                         cur = self.conn.execute(
                             f"DELETE FROM {table} WHERE id IN "

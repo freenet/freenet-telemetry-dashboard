@@ -226,3 +226,72 @@ class TestContradictoryTerminalsAreResolvedDeterministically:
         track(srv, "subscribe_not_found", "tx-e", ts=200)
         tx = track(srv, "get_terminal", "tx-e", ts=300, terminal_outcome="success")
         assert tx["outcome"] == "success"
+
+
+class TestPrecedenceTableIsTotal:
+    """Two outcomes sharing a rank compare equal, fall through to first-wins,
+    and become arrival-order-dependent again — the property the table exists to
+    remove. So every producible outcome needs a rank, and the ranks must differ.
+    """
+
+    def producible_outcomes(self, srv):
+        from_types = {v[1] for v in srv.TX_TERMINAL_EVENTS.values()}
+        return from_types | srv.CLIENT_TERMINAL_OUTCOMES
+
+    def test_every_producible_outcome_is_ranked(self, srv):
+        unranked = self.producible_outcomes(srv) - set(srv.TX_OUTCOME_PRECEDENCE)
+        assert not unranked, (
+            f"unranked outcomes tie at 0 and resolve by arrival order: {unranked}"
+        )
+
+    def test_ranks_are_distinct(self, srv):
+        ranks = list(srv.TX_OUTCOME_PRECEDENCE.values())
+        assert len(ranks) == len(set(ranks)), "equal ranks reintroduce first-wins"
+
+    @pytest.mark.parametrize("a,b", [
+        ("put_failure", "connect_rejected"),
+        ("connect_rejected", "put_failure"),
+        ("subscribe_timeout", "put_failure"),
+        ("put_failure", "subscribe_timeout"),
+    ])
+    def test_previously_unranked_pairs_resolve_the_same_either_way(self, srv, a, b):
+        """`failure` and `disconnected` used to sit at 0 together."""
+        def settle(order):
+            srv.transactions.clear()
+            srv.transaction_order.clear()
+            for i, et in enumerate(order):
+                srv.track_transaction("tx", et, 100 + i, "peer-a")
+            return srv.transactions["tx"]["outcome"]
+        assert settle([a, b]) == settle([b, a])
+
+
+class TestClientFacingTerminalsWinOnTheirOwnMerit:
+    """Not merely because they happen to rank higher.
+
+    A fixture where the client-facing terminal ALSO wins numerically leaves the
+    authority branch unpinned: deleting it entirely still passes. These pick
+    cases where precedence and client-facing authority actively disagree.
+    """
+
+    def test_a_lower_ranked_client_terminal_still_beats_a_hop_terminal(self, srv):
+        # subscribe_success ranks above not_found, so numeric precedence alone
+        # would keep it; only the client-facing rule overturns that.
+        track(srv, "subscribe_request", "tx-1", ts=100)
+        track(srv, "subscribe_success", "tx-1", ts=200)
+        tx = track(srv, "get_terminal", "tx-1", ts=300, terminal_outcome="not_found")
+        assert tx["outcome"] == "not_found", (
+            "a client-facing terminal must win even when it ranks lower"
+        )
+
+    def test_a_higher_ranked_hop_terminal_cannot_displace_a_client_terminal(self, srv):
+        track(srv, "get_request", "tx-2", ts=100)
+        track(srv, "get_terminal", "tx-2", ts=200, terminal_outcome="not_found")
+        tx = track(srv, "subscribe_success", "tx-2", ts=300)
+        assert tx["outcome"] == "not_found"
+
+    def test_the_two_rules_are_independently_load_bearing(self, srv):
+        """Both directions, so neither branch can be deleted silently."""
+        assert srv.outcome_wins("not_found", "get_terminal",
+                                "success", "subscribe_success") is True
+        assert srv.outcome_wins("success", "subscribe_success",
+                                "not_found", "get_terminal") is False

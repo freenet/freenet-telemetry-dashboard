@@ -1319,12 +1319,23 @@ CLIENT_FACING_TERMINALS = {"get_terminal"}
 # the same transaction could be recorded either way across restarts. Rank them
 # instead: a success response genuinely traversed the path, whereas a not_found
 # at one hop says nothing about the others.
+# Every rank is distinct and every producible outcome appears: two outcomes
+# sharing a rank would compare equal, fall through to first-wins, and be
+# arrival-order-dependent again — the exact property this table exists to
+# remove. tx_outcome_precedence_is_total() pins that.
 TX_OUTCOME_PRECEDENCE = {
-    "success": 4,
-    "not_found": 3,
-    "timeout": 2,
-    "rejected": 1,
+    "success": 7,
+    "not_found": 6,
+    "timeout_exhausted": 5,
+    "timeout": 4,
+    "rejected": 3,
+    "failure": 2,
+    "disconnected": 1,
 }
+
+# Outcomes get_terminal can carry, which do not appear in TX_TERMINAL_EVENTS
+# because they arrive in the event body rather than being implied by the type.
+CLIENT_TERMINAL_OUTCOMES = {"success", "not_found", "timeout_exhausted"}
 
 
 def outcome_wins(new_outcome, new_event_type, old_outcome, old_event_type):

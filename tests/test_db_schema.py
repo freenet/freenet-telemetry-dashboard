@@ -199,22 +199,65 @@ class TestTransactionRoundTrip:
 
 
 class TestGetTerminalsNeedsNoIndex:
-    """A deliberate decision, not an oversight.
+    """A deliberate decision, pinned structurally rather than by a benchmark.
 
-    get_terminals is bounded by retention (~250k rows), and its one aggregate
-    query groups the whole window — so it scans by design. Measured at that row
-    count the aggregate takes 382ms scanning versus 799ms with an index on
-    timestamp_ns. Adding one would slow the query it was meant to help AND make
-    correctness depend on an operator running create_indexes.py.
+    get_terminal_buckets is called with since_ns = METRICS_MAX_AGE_NS (8 days)
+    against a 24h retention, so its WHERE matches every row by construction,
+    and it GROUPs BY a computed bucket expression no timestamp_ns index can
+    serve. So an index cannot help the only query this table exists for, at any
+    row count — which a timing run alone would not establish.
     """
 
     def test_no_index_is_declared_for_get_terminals(self):
         from telemetry_db import SCHEMA_INDEXES
         assert not any("get_terminals" in stmt for stmt in SCHEMA_INDEXES), (
-            "an index here slows get_terminal_buckets and adds an operator step"
+            "an index cannot serve this table's only query and adds an "
+            "operator step; see the note in SCHEMA_INDEXES"
         )
 
-    def test_the_aggregate_works_without_one(self, tmp_path):
+    def test_the_metrics_window_is_wider_than_retention(self, tmp_path):
+        """Why the WHERE filters nothing: the lookback exceeds what is kept."""
+        import ws_server
+        from telemetry_db import DEFAULT_RETENTION_NS
+        assert ws_server.METRICS_MAX_AGE_NS > DEFAULT_RETENTION_NS
+
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            now = time.time_ns()
+            for i in range(20):
+                db.insert_get_terminal(now - i * 3_600_000_000_000, f"t{i}", "p",
+                                       "c", "success", False, 0, 1, 1.0)
+            db.flush()
+            cut = now - ws_server.METRICS_MAX_AGE_NS
+            matched = db.conn.execute(
+                "SELECT COUNT(*) FROM get_terminals WHERE timestamp_ns > ?",
+                (cut,)).fetchone()[0]
+            total = db.conn.execute("SELECT COUNT(*) FROM get_terminals").fetchone()[0]
+            assert matched == total == 20, "the WHERE is not a filter in practice"
+        finally:
+            db.close()
+
+    def test_an_index_cannot_serve_the_group_by(self, tmp_path):
+        """The temp B-tree survives the index, so the index buys nothing."""
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            db.conn.execute(
+                "CREATE INDEX idx_probe ON get_terminals(timestamp_ns)")
+            bucket = 4 * 3600 * 1_000_000_000
+            plan = [r[-1] for r in db.conn.execute(
+                "EXPLAIN QUERY PLAN "
+                f"SELECT (timestamp_ns/{bucket})*{bucket} AS b, outcome, is_sub_op, "
+                "COUNT(*), AVG(elapsed_ms) FROM get_terminals "
+                "WHERE timestamp_ns > ? GROUP BY b, outcome, is_sub_op", (0,))]
+            assert any("TEMP B-TREE" in step for step in plan), (
+                f"expected the GROUP BY to still need a temp B-tree, got {plan}"
+            )
+        finally:
+            db.close()
+
+    def test_the_aggregate_is_correct_without_an_index(self, tmp_path):
         db = TelemetryDB(str(tmp_path / "t.db"))
         db.open()
         try:
@@ -227,23 +270,66 @@ class TestGetTerminalsNeedsNoIndex:
             db.flush()
             rows = db.get_terminal_buckets(base - bucket, bucket)
             assert sum(r[3] for r in rows) == 50
+            assert {r[1] for r in rows} == {"success", "not_found"}
         finally:
             db.close()
 
-    def test_pruning_still_bounds_the_table(self, tmp_path):
-        """Without an index the scan cost is only acceptable while retention
-        keeps the table small, so pruning is what makes the choice safe."""
-        db = TelemetryDB(str(tmp_path / "t.db"))
+
+class TestMigrationRepairsADatabaseThatRanTheRenamingVersion:
+    """The superseded migration renamed `status` away. CREATE TABLE IF NOT
+    EXISTS cannot bring a renamed column back, so without an explicit repair a
+    rollback to pre-#16 code fails with "no such column: status" — and
+    _try_flush swallows that by disabling writes permanently, so the process
+    keeps running while persisting nothing.
+    """
+
+    def make_renamed_db(self, path):
+        """A database in the state #16's migration would have left it."""
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE transactions (
+                tx_id TEXT PRIMARY KEY, op TEXT NOT NULL, contract_key TEXT,
+                contract_short TEXT, start_ns INTEGER NOT NULL, end_ns INTEGER,
+                tx_shape TEXT DEFAULT 'partial', outcome TEXT, duration_ms REAL,
+                event_count INTEGER DEFAULT 0
+            );
+        """)
+        conn.execute("INSERT INTO transactions (tx_id, op, start_ns, tx_shape) "
+                     "VALUES ('t1', 'get', 1, 'settled')")
+        conn.commit()
+        conn.close()
+
+    def test_status_is_restored(self, tmp_path):
+        p = str(tmp_path / "renamed.db")
+        self.make_renamed_db(p)
+        db = TelemetryDB(p)
         db.open()
         try:
-            now = time.time_ns()
-            for i in range(10):
-                db.insert_get_terminal(now - 48 * 3600 * 1_000_000_000 + i,
-                                       f"old{i}", "p", "c", "success", False, 0, 1, 1.0)
-            db.insert_get_terminal(now, "new", "p", "c", "success", False, 0, 1, 1.0)
-            db.flush()
-            db.prune(retention_ns=24 * 3600 * 1_000_000_000)
-            left = [r[0] for r in db.conn.execute("SELECT tx_id FROM get_terminals")]
-            assert left == ["new"]
+            assert "status" in columns(db.conn, "transactions")
+        finally:
+            db.close()
+
+    def test_a_pre_16_writer_can_insert_again(self, tmp_path):
+        p = str(tmp_path / "renamed.db")
+        self.make_renamed_db(p)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            db.conn.execute(
+                "INSERT INTO transactions (tx_id, op, contract_key, contract_short, "
+                "start_ns, end_ns, status, duration_ms, event_count) "
+                "VALUES ('old', 'get', NULL, NULL, 1, 2, 'pending', 1.0, 1)")
+        finally:
+            db.close()
+
+    def test_existing_new_style_rows_are_untouched(self, tmp_path):
+        p = str(tmp_path / "renamed.db")
+        self.make_renamed_db(p)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            assert db.conn.execute(
+                "SELECT tx_shape FROM transactions WHERE tx_id='t1'"
+            ).fetchone()[0] == "settled"
         finally:
             db.close()
