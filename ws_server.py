@@ -725,7 +725,6 @@ def get_metrics_timeseries():
         # during the 2026-07-26 growth surge (issue #15).
         get_total = b["gt_ok"] + b["gt_bad"]
         get_sub_total = b["gt_sub_ok"] + b["gt_sub_bad"]
-        sub_total = b["sub_ok"] + b["sub_bad"]
 
         series.append({
             "t": b["ts"],
@@ -733,13 +732,18 @@ def get_metrics_timeseries():
             "get_rate": rate_or_none(b["gt_ok"], get_total),
             "get_sub_rate": rate_or_none(b["gt_sub_ok"], get_sub_total),
             "upd_rate": rate_or_none(b["upd_ok"], upd_total),
-            "sub_rate": rate_or_none(b["sub_ok"], sub_total),
+            # No sub_rate. SUBSCRIBE has no client-facing terminal event, so
+            # subscribe_success/_not_found are minted per hop on the response
+            # path and their ratio weights by hop count — the same defect that
+            # made GET read 0.05% against a real 87% (issue #15). There is no
+            # arithmetic that fixes it, so the counts ship without a rate.
             "put_n": put_total,
             "get_n": get_total,
             "get_sub_n": get_sub_total,
             "upd_n": upd_total,
-            "sub_n": sub_total,
-            # Per-hop routing volume. Deliberately not a success signal.
+            # Per-hop volumes. Deliberately not success signals.
+            "sub_hops_ok": b["sub_ok"],
+            "sub_hops_bad": b["sub_bad"],
             "get_hops_n": b["get_req"] + b["get_nf"],
             "lat_put": p50(b["lat_put"]),
             "lat_get": p50(b["lat_get"]),
@@ -1300,6 +1304,55 @@ TX_TERMINAL_EVENTS = {
 
 TRACKED_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
 
+# Only GET has a client-facing terminal. The core emits GetEvent::ClientTerminal
+# at the client boundary; there is no equivalent variant on SubscribeEvent,
+# PutEvent or UpdateEvent (see event_kind.rs, where ClientTerminal is a GetEvent
+# variant and PutSuccess/SubscribeSuccess/SubscribeNotFound are documented
+# alongside the per-hop GetSuccess/GetNotFound).
+CLIENT_FACING_TERMINALS = {"get_terminal"}
+
+# Hop-observed terminals arrive once per peer on the response path, so a single
+# transaction can produce several — and for SUBSCRIBE they can contradict each
+# other outright (subscribe/op_ctx_task.rs has a path emitting both
+# subscribe_not_found and subscribe_success for one client subscribe).
+# Last-write-wins made the stored outcome depend on collector ingest order, so
+# the same transaction could be recorded either way across restarts. Rank them
+# instead: a success response genuinely traversed the path, whereas a not_found
+# at one hop says nothing about the others.
+# Every rank is distinct and every producible outcome appears: two outcomes
+# sharing a rank would compare equal, fall through to first-wins, and be
+# arrival-order-dependent again — the exact property this table exists to
+# remove. tx_outcome_precedence_is_total() pins that.
+TX_OUTCOME_PRECEDENCE = {
+    "success": 7,
+    "not_found": 6,
+    "timeout_exhausted": 5,
+    "timeout": 4,
+    "rejected": 3,
+    "failure": 2,
+    "disconnected": 1,
+}
+
+# Outcomes get_terminal can carry, which do not appear in TX_TERMINAL_EVENTS
+# because they arrive in the event body rather than being implied by the type.
+CLIENT_TERMINAL_OUTCOMES = {"success", "not_found", "timeout_exhausted"}
+
+
+def outcome_wins(new_outcome, new_event_type, old_outcome, old_event_type):
+    """Should `new_outcome` replace `old_outcome` on the same transaction?
+
+    A client-facing terminal is authoritative and is never overridden by a
+    hop-observed one; otherwise the higher precedence wins, deterministically.
+    """
+    if old_outcome is None:
+        return True
+    if old_event_type in CLIENT_FACING_TERMINALS:
+        return False
+    if new_event_type in CLIENT_FACING_TERMINALS:
+        return True
+    return (TX_OUTCOME_PRECEDENCE.get(new_outcome, 0)
+            > TX_OUTCOME_PRECEDENCE.get(old_outcome, 0))
+
 
 def classify_tx_event(event_type):
     """Map an event type to (op_type, role) where role is 'start', 'terminal'
@@ -1373,6 +1426,9 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None,
             # nothing about how it ended.
             "tx_shape": "open" if is_start else "partial",
             "outcome": None,
+            # Which event set `outcome`, so a hop-observed terminal cannot
+            # overwrite a client-facing one.
+            "outcome_src": None,
         }
         transaction_order.append(tx_id)
         prune_old_transactions()
@@ -1397,6 +1453,10 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None,
     if timestamp < tx["start_ns"]:
         tx["start_ns"] = timestamp
 
+    # A start only promotes an unclassified transaction. get_request is per-HOP,
+    # so a relay's request can legitimately arrive after the originator's
+    # terminal; without this guard that late event would demote a settled
+    # transaction back to 'open' while leaving its outcome in place.
     if is_start and tx["tx_shape"] == "partial":
         tx["tx_shape"] = "open"
 
@@ -1404,7 +1464,9 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None,
     if is_end:
         tx["end_ns"] = timestamp
         tx["tx_shape"] = "settled"
-        tx["outcome"] = outcome
+        if outcome_wins(outcome, event_type, tx["outcome"], tx["outcome_src"]):
+            tx["outcome"] = outcome
+            tx["outcome_src"] = event_type
     elif timestamp > (tx["end_ns"] or 0):
         tx["end_ns"] = timestamp
 
@@ -2173,9 +2235,6 @@ def get_operation_stats():
     sub_op = get["term_sub_op"]
     direct_total = sum(direct.values())
     sub_op_total = sum(sub_op.values())
-    sub_total = (subscribe["successes"] + subscribe["not_found"]
-                 + subscribe["timeouts"])
-
     return {
         "put": {
             "total": put["requests"],
@@ -2201,12 +2260,15 @@ def get_operation_stats():
             "broadcasts": update["broadcasts"],
             "latency": calc_percentiles(update["latencies"]),
         },
+        # SUBSCRIBE counters are per-HOP observations, named so they cannot be
+        # read as an operation outcome. No success_rate: see the note in
+        # get_metrics_timeseries — SUBSCRIBE has no client-facing terminal
+        # event, so no honest rate can be derived from these.
         "subscribe": {
-            "total": sub_total,
-            "requests": subscribe["requests"],
-            "success_rate": calc_rate(subscribe["successes"], sub_total) if sub_total else None,
-            "not_found": subscribe["not_found"],
-            "timeouts": subscribe["timeouts"],
+            "hop_requests": subscribe["requests"],
+            "hop_successes": subscribe["successes"],
+            "hop_not_found": subscribe["not_found"],
+            "hop_timeouts": subscribe["timeouts"],
         },
     }
 

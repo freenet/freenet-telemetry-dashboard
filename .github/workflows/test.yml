@@ -13,10 +13,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        # The client/server agreement tests drive the real js/events.js through
+        # node rather than reimplementing it. They skip without node, so it has
+        # to be present here or the agreement is silently unverified.
+        with:
+          node-version: '20'
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest tests/ -v
+      - name: Fail if the cross-runtime agreement tests were skipped
+        run: |
+          python -m pytest tests/test_server_client_agreement.py -q -rs \
+            | tee /tmp/agree.txt
+          if grep -q "skipped" /tmp/agree.txt; then
+            echo "agreement tests skipped — node missing, agreement unverified"
+            exit 1
+          fi
 
   syntax:
     runs-on: ubuntu-latest

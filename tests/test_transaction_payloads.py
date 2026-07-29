@@ -14,22 +14,46 @@ import ws_server
 from conftest import make_record
 
 
-class TestBackfillMatchesTheServer:
-    def test_start_events_agree(self):
-        assert backfill_db.TX_START_EVENTS == set(ws_server.TX_START_EVENTS)
+class TestBackfillSharesTheServersDefinitions:
+    """backfill_db.py writes the same tables by an independent path.
 
-    def test_terminal_events_and_outcomes_agree(self):
-        server = {k: v[1] for k, v in ws_server.TX_TERMINAL_EVENTS.items()}
-        assert backfill_db.TX_TERMINAL_EVENTS == server
+    It used to keep its own transcription of the classification tables and
+    drifted twice: keying subscribes off `subscribed` (never emitted) and
+    recording get_not_found as "success". It now imports them, so drift is
+    unrepresentable rather than merely tested for.
+    """
+
+    def test_tables_are_the_servers_own(self):
+        assert backfill_db.TX_START_EVENTS == set(ws_server.TX_START_EVENTS)
+        assert backfill_db.TX_TERMINAL_EVENTS == \
+            {k: v[1] for k, v in ws_server.TX_TERMINAL_EVENTS.items()}
+        assert backfill_db.outcome_wins is ws_server.outcome_wins
+
+    def test_schema_is_the_servers_own(self):
+        """The hand-copied DDL silently omitted get_terminals, so a rebuilt
+        database produced a chart with both GET lines blank."""
+        import inspect
+        import telemetry_db
+        src = inspect.getsource(backfill_db.main)
+        assert "executescript(SCHEMA_TABLES)" in src
+        assert "CREATE TABLE events" not in src, "schema was re-transcribed"
+        assert "get_terminals" in telemetry_db.SCHEMA_TABLES
 
     def test_backfill_does_not_settle_on_per_hop_get_events(self):
-        """It used to mark get_not_found as 'success' outright."""
         assert "get_success" not in backfill_db.TX_TERMINAL_EVENTS
         assert "get_not_found" not in backfill_db.TX_TERMINAL_EVENTS
 
     def test_backfill_stores_the_client_facing_get_event(self):
         assert "get_terminal" in backfill_db.HISTORY_EVENT_TYPES
         assert "subscribe_timeout" in backfill_db.HISTORY_EVENT_TYPES
+
+    def test_backfill_populates_get_terminals(self):
+        """Without this the documented recovery path restores PUT and UPDATE
+        and leaves both GET lines blank — the metric this work exists to fix."""
+        import inspect
+        src = inspect.getsource(backfill_db.main)
+        assert "INSERT INTO get_terminals" in src
+        assert "getterm_buf.append" in src
 
 
 class TestLiveAndHistoryPayloadsAgree:

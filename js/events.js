@@ -389,6 +389,38 @@ const TX_TERMINAL_EVENTS = {
     disconnect: ['disconnect', 'disconnected'],
 };
 
+// Hop-observed terminals arrive once per peer on the response path, so one
+// transaction can produce several and for SUBSCRIBE they can contradict each
+// other. Resolving by arrival order made the stored outcome depend on ingest
+// order. Keep this table and outcomeWins() in step with TX_OUTCOME_PRECEDENCE
+// and outcome_wins() in ws_server.py — the resolution rule is part of what the
+// two sides must agree on, not just the classification.
+const TX_OUTCOME_PRECEDENCE = {
+    success: 7,
+    not_found: 6,
+    timeout_exhausted: 5,
+    timeout: 4,
+    rejected: 3,
+    failure: 2,
+    disconnected: 1,
+};
+
+// Only GET has a client-facing terminal; the core has no ClientTerminal
+// analogue on SubscribeEvent, PutEvent or UpdateEvent.
+const CLIENT_FACING_TERMINALS = new Set(['get_terminal']);
+
+/**
+ * Should `newOutcome` replace `oldOutcome` on the same transaction?
+ * A client-facing terminal is authoritative and is never overridden by a
+ * hop-observed one; otherwise the higher precedence wins, deterministically.
+ */
+export function outcomeWins(newOutcome, newEventType, oldOutcome, oldEventType) {
+    if (oldOutcome == null) return true;
+    if (CLIENT_FACING_TERMINALS.has(oldEventType)) return false;
+    if (CLIENT_FACING_TERMINALS.has(newEventType)) return true;
+    return (TX_OUTCOME_PRECEDENCE[newOutcome] || 0) > (TX_OUTCOME_PRECEDENCE[oldOutcome] || 0);
+}
+
 /**
  * Map an event type to { op, role } where role is 'start', 'terminal' or null.
  */
@@ -399,7 +431,7 @@ export function classifyTxEvent(eventType) {
     if (eventType.startsWith('put_')) return { op: 'put', role: null };
     if (eventType.startsWith('get_')) return { op: 'get', role: null };
     if (eventType.startsWith('update_')) return { op: 'update', role: null };
-    if (eventType.startsWith('subscribe') || eventType === 'unsubscribed') return { op: 'subscribe', role: null };
+    if (eventType.startsWith('subscribe')) return { op: 'subscribe', role: null };
     if (eventType.startsWith('connect')) return { op: 'connect', role: null };
     if (eventType.includes('broadcast')) return { op: 'broadcast', role: null };
     return { op: eventType.split('_')[0] || 'other', role: null };
@@ -453,7 +485,10 @@ export function trackTransactionFromEvent(event) {
         }
         if (isEnd) {
             tx.tx_shape = 'settled';
-            tx.outcome = outcome;
+            if (outcomeWins(outcome, eventType, tx.outcome, tx.outcome_src)) {
+                tx.outcome = outcome;
+                tx.outcome_src = eventType;
+            }
             tx.duration_ms = (tx.end_ns - tx.start_ns) / 1_000_000;
         }
     } else {
@@ -470,6 +505,9 @@ export function trackTransactionFromEvent(event) {
             // but neither its start nor a terminal, so its result is unknown.
             tx_shape: isEnd ? 'settled' : (isStart ? 'open' : 'partial'),
             outcome: isEnd ? outcome : null,
+            // Which event set `outcome`, so a hop-observed terminal cannot
+            // overwrite a client-facing one.
+            outcome_src: isEnd ? eventType : null,
             event_count: 1,
             events: [{
                 event_type: eventType,

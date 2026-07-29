@@ -63,12 +63,28 @@ CREATE TABLE IF NOT EXISTS events (
 --   'settled' -- a genuine terminal event was seen; `outcome` says which
 --   'partial' -- events seen, but neither a start nor a terminal. Propagation
 --                events (update_broadcast_received and friends) land here.
--- `outcome` is the MEASURED result and is NULL unless tx_shape='settled'.
--- Success rates must be computed over `outcome`, which is NULL exactly when
--- nothing was measured, so the wrong query returns no rows rather than a
--- confident wrong number. This column pair replaced a single `status` column
--- whose 'complete' value was a fallback for "first event wasn't a start" —
--- see issue #15.
+--
+-- `outcome` is NULL unless tx_shape='settled', so a rate computed over it
+-- returns no rows rather than a confident wrong number when nothing was
+-- measured. What it means depends on the op, and the difference matters:
+--
+--   GET  -- CLIENT-FACING. Sourced from get_terminal, the only event the core
+--           emits at the client boundary. Safe to compute a success rate from,
+--           and the get_terminals table exists for exactly that.
+--   everything else -- HOP-OBSERVED. The core has no ClientTerminal analogue
+--           for SUBSCRIBE/PUT/UPDATE (see event_kind.rs: ClientTerminal is a
+--           GetEvent variant only), so their terminals are minted at each peer
+--           on the response path. One transaction can therefore produce several,
+--           and this column records the winner under TX_OUTCOME_PRECEDENCE in
+--           ws_server.py. It says "a terminal of this kind was observed
+--           somewhere on the path", NOT "this is what the client saw", and it
+--           MUST NOT be aggregated into a success rate — doing so weights by
+--           hop count, which is the exact defect issue #15 was filed about.
+--
+-- `status` is the superseded column, kept in place and untouched. Nothing
+-- writes it any more; it survives so a rollback to pre-#16 code still finds
+-- the column it expects. Read tx_shape/outcome instead. It can be dropped once
+-- rolling back that far is no longer a concern.
 CREATE TABLE IF NOT EXISTS transactions (
     tx_id TEXT PRIMARY KEY,
     op TEXT NOT NULL,
@@ -76,6 +92,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     contract_short TEXT,
     start_ns INTEGER NOT NULL,
     end_ns INTEGER,
+    status TEXT DEFAULT 'pending',
     tx_shape TEXT DEFAULT 'partial',
     outcome TEXT,
     duration_ms REAL,
@@ -179,7 +196,24 @@ SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id)",
     "CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_txe_peer_ts ON tx_events(peer_id, event_type, timestamp_ns)",
-    "CREATE INDEX IF NOT EXISTS idx_getterm_ts ON get_terminals(timestamp_ns)",
+    # get_terminals deliberately has NO index on timestamp_ns, for a structural
+    # reason rather than a benchmarked one. get_terminal_buckets is called with
+    # since_ns = METRICS_MAX_AGE_NS (8 days) against a 24h retention, so its
+    # WHERE matches every row by construction, and it GROUPs BY a computed
+    # bucket expression that no timestamp_ns index can serve — the query plan
+    # keeps its temp B-tree either way. An index therefore cannot help the only
+    # query this table exists for, at any row count. It would also make
+    # correctness depend on an operator running create_indexes.py, since
+    # nothing creates indexes at startup.
+    #
+    # The cost that DOES grow is prune's probe, which scans. The trigger is GET
+    # volume rising at fixed retention, not retention changing. Measured:
+    # 250k rows 382ms aggregate / 14ms probe; 500k 977/51; 1M 2142/167. prune
+    # blocks the asyncio event loop and probes at least twice per cycle, so 1M
+    # rows is roughly a 330ms stall per cycle with nothing alarming on it.
+    # Cheap now and linear from here — but this module's own retention comment
+    # records the network doubling in two days, so revisit when get_terminals
+    # approaches ~1M rows in a window.
     "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",
@@ -221,68 +255,65 @@ class TelemetryDB:
         self.conn.executescript(SCHEMA_TABLES)
         self._migrate()
 
-    # Bumped whenever SCHEMA_TABLES changes in a way an existing database has
-    # to be brought forward to. Stored in PRAGMA user_version.
-    SCHEMA_VERSION = 1
-
     def _migrate(self):
         """Bring an existing database up to the current schema.
 
-        CREATE TABLE IF NOT EXISTS silently leaves an older table alone, so
-        column changes need doing explicitly. The ALTER statements below are
-        metadata-only in SQLite (>= 3.25 for RENAME COLUMN), so they are
-        instant even on a 100+ GB database.
+        Purely additive: `status` is left in place and untouched, and the two
+        new columns are appended beside it. Nothing is renamed and no row is
+        rewritten, which has three consequences worth stating.
 
-        Gated on PRAGMA user_version so a restart costs one integer read: the
-        legacy rewrite below scans `transactions`, which has no index on the
-        old column and holds millions of rows.
+        It is effectively free. ADD COLUMN with a constant DEFAULT is
+        metadata-only in SQLite, so existing rows report the default without a
+        rewrite — measured at 0.011s against 2,931,393 rows, versus 7.1s for the
+        in-place rewrite this replaced.
+
+        It is reversible. Rolling back to pre-#16 code finds `status` exactly as
+        it left it. That matters more than it first appears: flush() batches
+        events, transactions, tx_events, flows and get_terminals into a single
+        transaction, and TelemetryDB._try_flush sets `_enabled = False`
+        permanently on error — so a missing column would abort the whole batch
+        and silently stop ALL dashboard ingest while the process looked healthy.
+
+        It loses nothing. Legacy rows keep their real terminal in `status` and
+        simply report tx_shape='partial' ("we have not classified this row"),
+        which is honest rather than lossy. Deriving tx_shape from `status` at
+        read time was considered and rejected: it would make a legacy row answer
+        'partial' to direct SQL and 'settled' to the dashboard API, and ad-hoc
+        SQL against this database is precisely how the #15 misdiagnosis
+        happened. It also avoids promoting per-hop GET verdicts — legacy
+        status='success' on a GET came from get_success, a per-hop event — into
+        a column documented as an outcome.
+
+        There is deliberately no PRAGMA user_version gate. The previous version
+        needed one to keep an expensive rewrite from re-running every restart;
+        with nothing expensive left, ADD COLUMN's own IF-absent check is the
+        cheaper and more honest guard, and a version counter that no migration
+        consults is a claim about ordering we would not be keeping.
         """
-        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version >= self.SCHEMA_VERSION:
-            return
-
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(transactions)")}
+        if not cols:
+            return  # table absent entirely; executescript above will have made it
+        # `status` is listed so it is RESTORED on a database that already ran
+        # the superseded renaming migration. CREATE TABLE IF NOT EXISTS cannot
+        # bring back a column that was renamed away, and without it a rollback
+        # to pre-#16 code fails with "no such column: status" — which
+        # _try_flush swallows by setting _enabled = False permanently, so the
+        # process keeps running and silently stops persisting everything. The
+        # rollback safety net this whole migration exists to provide would be
+        # missing on exactly the databases that most need it.
+        for name, ddl in (("status", "TEXT DEFAULT 'pending'"),
+                          ("tx_shape", "TEXT DEFAULT 'partial'"),
+                          ("outcome", "TEXT")):
+            if name not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE transactions ADD COLUMN {name} {ddl}")
 
-        # issue #15: `status` conflated "we saw a terminal" with "we saw
-        # anything at all". Split into tx_shape (structure) + outcome (result).
-        if "status" in cols and "tx_shape" not in cols:
-            self.conn.execute(
-                "ALTER TABLE transactions RENAME COLUMN status TO tx_shape")
-        if "outcome" not in cols:
-            self.conn.execute("ALTER TABLE transactions ADD COLUMN outcome TEXT")
-
-        # Rewrite legacy values so the retention window isn't a mix of two
-        # vocabularies. 'success'/'not_found' were genuine measured terminals.
-        # 'complete' was the fallback and is NOT evidence of a terminal, so it
-        # degrades to 'partial' — we truly do not know what happened.
-        t0 = time.time()
-        cur = self.conn.execute("""
-            UPDATE transactions
-               SET outcome = CASE WHEN tx_shape IN ('success', 'not_found')
-                                  THEN tx_shape ELSE outcome END,
-                   tx_shape = CASE tx_shape
-                                  WHEN 'pending' THEN 'open'
-                                  WHEN 'success' THEN 'settled'
-                                  WHEN 'not_found' THEN 'settled'
-                                  ELSE 'partial'
-                              END
-             WHERE tx_shape IN ('pending', 'complete', 'success', 'not_found')
-        """)
-        if cur.rowcount > 0:
-            print(f"[db] migrated {cur.rowcount:,} legacy transaction rows to "
-                  f"tx_shape/outcome in {time.time() - t0:.1f}s", flush=True)
-        self.conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
-
-    def ensure_indexes(self):
-        """Create all indexes. Fast if they already exist, slow for new indexes
-        on large tables. Call from a background thread on large DBs."""
-        for stmt in SCHEMA_INDEXES:
-            idx_name = stmt.split("IF NOT EXISTS ")[1].split(" ON ")[0]
-            t0 = time.time()
-            self.conn.execute(stmt)
-            dt = time.time() - t0
-            if dt > 1.0:
-                print(f"[index] {idx_name} created in {dt:.1f}s", flush=True)
+    # There is deliberately no ensure_indexes() here. One existed with zero
+    # callers, which read as "indexes are created for you" — they are not, and
+    # calling it would have taken an exclusive write lock for 30+ minutes per
+    # new index on a 128 GB database, stalling live ingest. Indexes are created
+    # offline by create_indexes.py while the server is stopped; that script is
+    # the only sanctioned path. See the note in ws_server.main().
 
     def close(self):
         if self.conn:
@@ -593,7 +624,10 @@ class TelemetryDB:
     def get_terminal_buckets(self, since_ns, bucket_ns):
         """Aggregate client-facing GET outcomes into time buckets.
 
-        Returns rows of (bucket_ts, outcome, is_sub_op, count, median elapsed_ms).
+        Returns rows of (bucket_ts, outcome, is_sub_op, count, mean elapsed_ms).
+        The mean is not currently consumed — get_terminal reports elapsed_ms=0
+        on ~99.5% of successful direct GETs, so latency comes from the
+        get_request -> get_success delta instead.
         Reads the small get_terminals projection rather than the events table,
         which has no event_type index and is hundreds of GB.
         """
@@ -1175,9 +1209,12 @@ class TelemetryDB:
                 deleted = 0
                 self.conn.execute("BEGIN")
                 try:
-                    # events/flows/get_terminals all carry an index on
-                    # timestamp_ns, so the subquery seeks straight to the old
-                    # rows and the outer DELETE removes them by primary key.
+                    # events and flows carry an index on timestamp_ns, so their
+                    # subquery seeks straight to the old rows and the outer
+                    # DELETE removes them by primary key. get_terminals has no
+                    # such index (see SCHEMA_INDEXES) so its probe scans; that
+                    # is affordable only while retention keeps the table small,
+                    # and it is the cost that grows if GET volume rises.
                     for table in ("events", "flows", "get_terminals"):
                         cur = self.conn.execute(
                             f"DELETE FROM {table} WHERE id IN "

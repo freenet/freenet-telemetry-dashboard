@@ -155,3 +155,143 @@ class TestInvariants:
         shapes = {tx["tx_shape"] for tx in srv.transactions.values()}
         assert "complete" not in shapes
         assert "pending" not in shapes
+
+
+class TestLateHopEventsDoNotDemoteASettledTransaction:
+    """`get_request` is per-HOP, so a relay's request can legitimately arrive
+    after the originator's terminal. Dropping the `tx_shape == "partial"` guard
+    survived the whole suite, yet it lets a late start flip a settled
+    transaction back to 'open' while leaving its outcome in place — which
+    violates the invariant that an outcome implies settled."""
+
+    def test_a_late_start_does_not_reopen_a_settled_transaction(self, srv):
+        track(srv, "get_request", "tx-1", ts=100)
+        track(srv, "get_terminal", "tx-1", ts=200, terminal_outcome="success")
+        tx = track(srv, "get_request", "tx-1", ts=300)
+        assert tx["tx_shape"] == "settled", "a late per-hop request reopened a settled tx"
+        assert tx["outcome"] == "success"
+
+    def test_the_invariant_holds_under_reordering(self, srv):
+        for i, et in enumerate(["get_terminal", "get_request", "get_request"]):
+            srv.track_transaction("tx-2", et, 100 + i, "peer-a",
+                                  terminal_outcome="not_found" if et == "get_terminal" else None)
+        tx = srv.transactions["tx-2"]
+        assert tx["outcome"] is None or tx["tx_shape"] == "settled"
+
+    @pytest.mark.parametrize("start_event", ["subscribe_request", "put_request",
+                                             "update_request"])
+    def test_holds_for_every_op(self, srv, start_event):
+        op = start_event.split("_")[0]
+        terminal = {"subscribe": "subscribe_success", "put": "put_success",
+                    "update": "update_success"}[op]
+        track(srv, start_event, "tx-3", ts=100)
+        track(srv, terminal, "tx-3", ts=200)
+        tx = track(srv, start_event, "tx-3", ts=300)
+        assert tx["tx_shape"] == "settled"
+
+
+class TestContradictoryTerminalsAreResolvedDeterministically:
+    """SUBSCRIBE/PUT/UPDATE terminals are minted per hop, and one client
+    subscribe can emit both subscribe_not_found and subscribe_success. Under
+    last-write-wins the stored outcome depended on collector ingest order."""
+
+    def test_success_wins_regardless_of_arrival_order(self, srv):
+        track(srv, "subscribe_request", "tx-a", ts=100)
+        track(srv, "subscribe_not_found", "tx-a", ts=200)
+        tx = track(srv, "subscribe_success", "tx-a", ts=300)
+        assert tx["outcome"] == "success"
+
+        track(srv, "subscribe_request", "tx-b", ts=100)
+        track(srv, "subscribe_success", "tx-b", ts=200)
+        tx = track(srv, "subscribe_not_found", "tx-b", ts=300)
+        assert tx["outcome"] == "success", "outcome depended on ingest order"
+
+    def test_repeated_hop_terminals_are_stable(self, srv):
+        track(srv, "subscribe_request", "tx-c", ts=100)
+        for i in range(4):  # a 4-hop subscribe emits four
+            track(srv, "subscribe_success", "tx-c", ts=200 + i)
+        assert srv.transactions["tx-c"]["outcome"] == "success"
+
+    def test_a_client_terminal_is_not_overridden_by_a_hop_terminal(self, srv):
+        """GET's client-facing verdict is authoritative."""
+        track(srv, "get_request", "tx-d", ts=100)
+        track(srv, "get_terminal", "tx-d", ts=200, terminal_outcome="timeout_exhausted")
+        tx = track(srv, "put_success", "tx-d", ts=300)
+        assert tx["outcome"] == "timeout_exhausted", (
+            "a hop-observed terminal overwrote the client-facing outcome"
+        )
+
+    def test_a_client_terminal_overrides_an_earlier_hop_terminal(self, srv):
+        track(srv, "subscribe_request", "tx-e", ts=100)
+        track(srv, "subscribe_not_found", "tx-e", ts=200)
+        tx = track(srv, "get_terminal", "tx-e", ts=300, terminal_outcome="success")
+        assert tx["outcome"] == "success"
+
+
+class TestPrecedenceTableIsTotal:
+    """Two outcomes sharing a rank compare equal, fall through to first-wins,
+    and become arrival-order-dependent again — the property the table exists to
+    remove. So every producible outcome needs a rank, and the ranks must differ.
+    """
+
+    def producible_outcomes(self, srv):
+        from_types = {v[1] for v in srv.TX_TERMINAL_EVENTS.values()}
+        return from_types | srv.CLIENT_TERMINAL_OUTCOMES
+
+    def test_every_producible_outcome_is_ranked(self, srv):
+        unranked = self.producible_outcomes(srv) - set(srv.TX_OUTCOME_PRECEDENCE)
+        assert not unranked, (
+            f"unranked outcomes tie at 0 and resolve by arrival order: {unranked}"
+        )
+
+    def test_ranks_are_distinct(self, srv):
+        ranks = list(srv.TX_OUTCOME_PRECEDENCE.values())
+        assert len(ranks) == len(set(ranks)), "equal ranks reintroduce first-wins"
+
+    @pytest.mark.parametrize("a,b", [
+        ("put_failure", "connect_rejected"),
+        ("connect_rejected", "put_failure"),
+        ("subscribe_timeout", "put_failure"),
+        ("put_failure", "subscribe_timeout"),
+    ])
+    def test_previously_unranked_pairs_resolve_the_same_either_way(self, srv, a, b):
+        """`failure` and `disconnected` used to sit at 0 together."""
+        def settle(order):
+            srv.transactions.clear()
+            srv.transaction_order.clear()
+            for i, et in enumerate(order):
+                srv.track_transaction("tx", et, 100 + i, "peer-a")
+            return srv.transactions["tx"]["outcome"]
+        assert settle([a, b]) == settle([b, a])
+
+
+class TestClientFacingTerminalsWinOnTheirOwnMerit:
+    """Not merely because they happen to rank higher.
+
+    A fixture where the client-facing terminal ALSO wins numerically leaves the
+    authority branch unpinned: deleting it entirely still passes. These pick
+    cases where precedence and client-facing authority actively disagree.
+    """
+
+    def test_a_lower_ranked_client_terminal_still_beats_a_hop_terminal(self, srv):
+        # subscribe_success ranks above not_found, so numeric precedence alone
+        # would keep it; only the client-facing rule overturns that.
+        track(srv, "subscribe_request", "tx-1", ts=100)
+        track(srv, "subscribe_success", "tx-1", ts=200)
+        tx = track(srv, "get_terminal", "tx-1", ts=300, terminal_outcome="not_found")
+        assert tx["outcome"] == "not_found", (
+            "a client-facing terminal must win even when it ranks lower"
+        )
+
+    def test_a_higher_ranked_hop_terminal_cannot_displace_a_client_terminal(self, srv):
+        track(srv, "get_request", "tx-2", ts=100)
+        track(srv, "get_terminal", "tx-2", ts=200, terminal_outcome="not_found")
+        tx = track(srv, "subscribe_success", "tx-2", ts=300)
+        assert tx["outcome"] == "not_found"
+
+    def test_the_two_rules_are_independently_load_bearing(self, srv):
+        """Both directions, so neither branch can be deleted silently."""
+        assert srv.outcome_wins("not_found", "get_terminal",
+                                "success", "subscribe_success") is True
+        assert srv.outcome_wins("success", "subscribe_success",
+                                "not_found", "get_terminal") is False
