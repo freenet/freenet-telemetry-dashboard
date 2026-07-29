@@ -353,6 +353,58 @@ export function isURLLoaded() {
     return urlLoaded;
 }
 
+// ── Transaction classification — mirrors ws_server.py (issue #15) ──────────
+//
+// A transaction carries two independent facts: `tx_shape` (what we OBSERVED:
+// 'open' / 'settled' / 'partial') and `outcome` (what was MEASURED, and only
+// when tx_shape === 'settled'). They replaced a single `status` field whose
+// 'complete' value really meant "the first event we saw wasn't a start event".
+// Keep these tables in step with TX_START_EVENTS / TX_TERMINAL_EVENTS in
+// ws_server.py — the server and this client must classify identically.
+
+const TX_START_EVENTS = {
+    put_request: 'put',
+    get_request: 'get',
+    update_request: 'update',
+    subscribe_request: 'subscribe',
+    connect_request_sent: 'connect',
+};
+
+// get_success / get_not_found are deliberately ABSENT: the core emits them once
+// per HOP, so settling on one reports a relay's local view as the client's.
+// get_terminal is the only client-facing GET outcome and is handled separately
+// because its outcome comes from the event body.
+const TX_TERMINAL_EVENTS = {
+    put_success: ['put', 'success'],
+    put_failure: ['put', 'failure'],
+    update_success: ['update', 'success'],
+    update_failure: ['update', 'failure'],
+    subscribe_success: ['subscribe', 'success'],
+    subscribe_not_found: ['subscribe', 'not_found'],
+    subscribe_timeout: ['subscribe', 'timeout'],
+    // Legacy alias; no current core release emits `subscribed`.
+    subscribed: ['subscribe', 'success'],
+    connect_connected: ['connect', 'success'],
+    connect_rejected: ['connect', 'rejected'],
+    disconnect: ['disconnect', 'disconnected'],
+};
+
+/**
+ * Map an event type to { op, role } where role is 'start', 'terminal' or null.
+ */
+export function classifyTxEvent(eventType) {
+    if (TX_START_EVENTS[eventType]) return { op: TX_START_EVENTS[eventType], role: 'start' };
+    if (TX_TERMINAL_EVENTS[eventType]) return { op: TX_TERMINAL_EVENTS[eventType][0], role: 'terminal' };
+    if (eventType === 'get_terminal') return { op: 'get', role: 'terminal' };
+    if (eventType.startsWith('put_')) return { op: 'put', role: null };
+    if (eventType.startsWith('get_')) return { op: 'get', role: null };
+    if (eventType.startsWith('update_')) return { op: 'update', role: null };
+    if (eventType.startsWith('subscribe') || eventType === 'unsubscribed') return { op: 'subscribe', role: null };
+    if (eventType.startsWith('connect')) return { op: 'connect', role: null };
+    if (eventType.includes('broadcast')) return { op: 'broadcast', role: null };
+    return { op: eventType.split('_')[0] || 'other', role: null };
+}
+
 /**
  * Track a transaction from an incoming event
  */
@@ -363,36 +415,20 @@ export function trackTransactionFromEvent(event) {
     const eventType = event.event_type || '';
     const timestamp = event.timestamp;
 
-    // Determine operation type and status
-    let op = 'other';
-    let isStart = false;
-    let isEnd = false;
-    let status = null;
-
-    if (eventType.startsWith('put_')) {
-        op = 'put';
-        if (eventType === 'put_request') isStart = true;
-        else if (eventType === 'put_success') { isEnd = true; status = 'success'; }
-    } else if (eventType.startsWith('get_')) {
-        op = 'get';
-        if (eventType === 'get_request') isStart = true;
-        else if (eventType === 'get_success') { isEnd = true; status = 'success'; }
-        else if (eventType === 'get_not_found') { isEnd = true; status = 'not_found'; }
-    } else if (eventType.startsWith('update_')) {
-        op = 'update';
-        if (eventType === 'update_request') isStart = true;
-        else if (eventType === 'update_success') { isEnd = true; status = 'success'; }
-    } else if (eventType.startsWith('subscribe')) {
-        op = 'subscribe';
-        if (eventType === 'subscribe_request') isStart = true;
-        else if (eventType === 'subscribed') { isEnd = true; status = 'success'; }
-    } else if (eventType.includes('connect')) {
-        op = 'connect';
-        if (eventType === 'connect_request_sent') isStart = true;
-        else if (eventType === 'connect_connected') { isEnd = true; status = 'success'; }
-    } else if (eventType === 'disconnect') {
-        op = 'disconnect';
-        isStart = true; isEnd = true; status = 'complete';
+    // Determine operation type, shape and (only when genuinely measured) outcome.
+    let { op, role } = classifyTxEvent(eventType);
+    const isStart = role === 'start';
+    let isEnd = role === 'terminal';
+    let outcome = null;
+    if (isEnd) {
+        if (eventType === 'get_terminal') {
+            // The outcome rides in the event body. Without it nothing has been
+            // measured, so refuse to claim a result.
+            outcome = event.outcome ?? null;
+            if (outcome === null) isEnd = false;
+        } else {
+            outcome = TX_TERMINAL_EVENTS[eventType][1];
+        }
     }
 
     // Check if transaction already exists
@@ -408,12 +444,16 @@ export function trackTransactionFromEvent(event) {
         });
         tx.event_count = tx.events.length;
 
-        // Update end time and status
+        // Update end time, shape and outcome
         if (timestamp > tx.end_ns) {
             tx.end_ns = timestamp;
         }
-        if (isEnd && status) {
-            tx.status = status;
+        if (isStart && tx.tx_shape === 'partial') {
+            tx.tx_shape = 'open';
+        }
+        if (isEnd) {
+            tx.tx_shape = 'settled';
+            tx.outcome = outcome;
             tx.duration_ms = (tx.end_ns - tx.start_ns) / 1_000_000;
         }
     } else {
@@ -426,7 +466,10 @@ export function trackTransactionFromEvent(event) {
             start_ns: timestamp,
             end_ns: timestamp,
             duration_ms: null,
-            status: (isStart && !isEnd) ? 'pending' : (status || 'complete'),
+            // 'partial' is the honest default: an event for this transaction,
+            // but neither its start nor a terminal, so its result is unknown.
+            tx_shape: isEnd ? 'settled' : (isStart ? 'open' : 'partial'),
+            outcome: isEnd ? outcome : null,
             event_count: 1,
             events: [{
                 event_type: eventType,

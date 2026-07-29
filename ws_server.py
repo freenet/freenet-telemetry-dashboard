@@ -201,14 +201,14 @@ HISTORY_EVENT_TYPES = {
     "get_request", "get_success", "get_not_found", "get_failure",
     # get_terminal carries the CLIENT-FACING outcome of a GET (success /
     # not_found / timeout_exhausted) plus is_sub_op, attempts, elapsed_ms and
-    # hop_count. Without it the DB cannot answer "are GETs working": the
-    # get_request/get_not_found events are emitted per HOP, so their ratio
-    # tracks route length rather than user-visible success, and
-    # transactions.status is not a measured outcome either (see the comment on
-    # tx status assignment below). Low volume — roughly 900/hour network-wide.
+    # hop_count. It is the sole basis for every GET success rate the dashboard
+    # reports: the get_request/get_not_found events are emitted per HOP, so
+    # their ratio tracks route length rather than user-visible success.
+    # Low volume — roughly 8k/hour network-wide at ~900 peers.
     "get_terminal",
     "update_request", "update_success", "update_failure",
     "subscribe_request", "subscribe_success", "subscribe_not_found",
+    "subscribe_timeout",
     # Update propagation
     "update_broadcast_received", "update_broadcast_applied",
     "update_broadcast_emitted", "broadcast_emitted",
@@ -503,18 +503,32 @@ def get_propagation_data():
 
 
 # Operation statistics
+#
+# GET has two distinct families of counter and they must not be mixed:
+#   hop_requests / hop_not_found   — per-HOP routing events. Their ratio tracks
+#                                    route length, NOT user-visible success.
+#   term_*                         — client-facing outcomes from get_terminal,
+#                                    split by direct vs sub-operation. These are
+#                                    the only ones a success rate may use.
 op_stats = {
     "put": {"requests": 0, "successes": 0, "latencies": []},
-    "get": {"requests": 0, "successes": 0, "not_found": 0, "latencies": []},
+    "get": {
+        "hop_requests": 0, "hop_not_found": 0,
+        "term_direct": {"success": 0, "not_found": 0, "other": 0},
+        "term_sub_op": {"success": 0, "not_found": 0, "other": 0},
+        "latencies": [],
+    },
     "update": {"requests": 0, "successes": 0, "broadcasts": 0, "latencies": []},
-    "subscribe": {"requests": 0, "successes": 0},
+    "subscribe": {"requests": 0, "successes": 0, "not_found": 0, "timeouts": 0},
 }
 
 # ── Time-series metrics (4-hour buckets, kept for 8 days) ──
 METRICS_BUCKET_NS = 4 * 60 * 60 * 1_000_000_000    # 4 hours
 METRICS_MAX_AGE_NS = 8 * 24 * 60 * 60 * 1_000_000_000  # 8 days
 METRICS_MIN_SAMPLES = 5  # Minimum ops in a bucket to compute a meaningful rate
-# Each bucket: {ts, put_req, put_ok, get_req, get_ok, get_nf, upd_req, upd_ok, sub_ok, peers, latencies_put, latencies_get, latencies_upd}
+# Each bucket: {ts, put_req, put_ok, get_req, get_nf (per-HOP volume),
+#               gt_ok/gt_bad + gt_sub_ok/gt_sub_bad (client-facing GET outcomes),
+#               upd_req, upd_ok, sub_ok, sub_bad, peers, lat_put, lat_get, lat_upd}
 metrics_buckets = {}       # bucket_key -> bucket dict (dict for O(1) lookup by timestamp)
 _current_bucket = None     # the bucket we're currently filling
 
@@ -551,9 +565,13 @@ def _get_or_create_bucket(timestamp_ns):
     _current_bucket = {
         "ts": key,
         "put_req": 0, "put_ok": 0,
-        "get_req": 0, "get_ok": 0, "get_nf": 0,
+        # get_req/get_nf are per-HOP counts, kept for routing volume only.
+        "get_req": 0, "get_nf": 0,
+        # Client-facing GET outcomes from get_terminal, split direct vs sub-op.
+        "gt_ok": 0, "gt_bad": 0,
+        "gt_sub_ok": 0, "gt_sub_bad": 0,
         "upd_req": 0, "upd_ok": 0,
-        "sub_ok": 0,
+        "sub_ok": 0, "sub_bad": 0,
         "reporting_peers": set(),
         "lat_put": [], "lat_get": [], "lat_upd": [],
     }
@@ -561,8 +579,13 @@ def _get_or_create_bucket(timestamp_ns):
     return _current_bucket
 
 
-def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None):
-    """Record an operation into the current time bucket."""
+def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None,
+                  outcome=None, is_sub_op=False):
+    """Record an operation into the current time bucket.
+
+    `outcome`/`is_sub_op` apply to get_terminal, the only GET event that
+    reports what the requesting client actually saw.
+    """
     b = _get_or_create_bucket(timestamp_ns)
     if peer_id:
         b["reporting_peers"].add(peer_id)
@@ -574,20 +597,28 @@ def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None):
             b["lat_put"].append(latency_ms)
     elif event_type == "get_request":
         b["get_req"] += 1
-    elif event_type == "get_success":
-        b["get_ok"] += 1
-        if latency_ms is not None:
-            b["lat_get"].append(latency_ms)
     elif event_type == "get_not_found":
         b["get_nf"] += 1
+    elif event_type == "get_success":
+        # Per-hop, so it contributes latency only — never a rate counter.
+        if latency_ms is not None:
+            b["lat_get"].append(latency_ms)
+    elif event_type == "get_terminal":
+        ok = outcome == "success"
+        if is_sub_op:
+            b["gt_sub_ok" if ok else "gt_sub_bad"] += 1
+        else:
+            b["gt_ok" if ok else "gt_bad"] += 1
     elif event_type == "update_request":
         b["upd_req"] += 1
     elif event_type == "update_success":
         b["upd_ok"] += 1
         if latency_ms is not None:
             b["lat_upd"].append(latency_ms)
-    elif event_type == "subscribed":
+    elif event_type == "subscribe_success":
         b["sub_ok"] += 1
+    elif event_type in ("subscribe_not_found", "subscribe_timeout"):
+        b["sub_bad"] += 1
 
 
 def record_version(version_str, timestamp_ns):
@@ -609,11 +640,13 @@ def precompute_metrics_from_db():
     now_ns = int(_time.time() * 1_000_000_000)
     cutoff_ns = now_ns - METRICS_MAX_AGE_NS  # 8 days
 
+    # get_terminal is absent here on purpose: tx_events has no outcome column,
+    # so GET success is precomputed from the get_terminals table below.
     metric_event_types = (
         'put_request', 'put_success',
-        'get_request', 'get_success', 'get_not_found',
+        'get_request', 'get_not_found',
         'update_request', 'update_success',
-        'subscribed',
+        'subscribe_success', 'subscribe_not_found', 'subscribe_timeout',
     )
 
     # Use tx_events (no JSON blob column, much smaller than events table)
@@ -630,15 +663,13 @@ def precompute_metrics_from_db():
         ORDER BY bucket
     """, (cutoff_ns, *metric_event_types)).fetchall()
 
-    if not rows:
-        return
-
     # Map event_type -> bucket field name for bulk updates
     _type_to_field = {
         'put_request': 'put_req', 'put_success': 'put_ok',
-        'get_request': 'get_req', 'get_success': 'get_ok', 'get_not_found': 'get_nf',
+        'get_request': 'get_req', 'get_not_found': 'get_nf',
         'update_request': 'upd_req', 'update_success': 'upd_ok',
-        'subscribed': 'sub_ok',
+        'subscribe_success': 'sub_ok',
+        'subscribe_not_found': 'sub_bad', 'subscribe_timeout': 'sub_bad',
     }
     total_events = 0
     for event_type, bucket_ts, count in rows:
@@ -647,6 +678,24 @@ def precompute_metrics_from_db():
         field = _type_to_field.get(event_type)
         if field:
             b[field] += count
+
+    # Client-facing GET outcomes come from their own table, which stores the
+    # outcome and is_sub_op that tx_events cannot carry.
+    try:
+        for bucket_ts, outcome, is_sub_op, count, _avg_ms in db.get_terminal_buckets(
+                cutoff_ns, METRICS_BUCKET_NS):
+            total_events += count
+            b = _get_or_create_bucket(bucket_ts)
+            ok = outcome == "success"
+            if is_sub_op:
+                b["gt_sub_ok" if ok else "gt_sub_bad"] += count
+            else:
+                b["gt_ok" if ok else "gt_bad"] += count
+    except Exception as e:
+        print(f"[metrics] get_terminal precompute skipped: {e}", flush=True)
+
+    if not metrics_buckets:
+        return
 
     print(f"Precomputed metrics: {len(metrics_buckets)} buckets from {total_events} events (aggregated)", flush=True)
 
@@ -670,18 +719,28 @@ def get_metrics_timeseries():
     for key in sorted(metrics_buckets):
         b = metrics_buckets[key]
         put_total = b["put_req"] or b["put_ok"]
-        get_total = b["get_ok"] + b["get_nf"]
         upd_total = b["upd_req"] or b["upd_ok"]
+        # GET success is measured from get_terminal only. Deriving it from the
+        # per-hop get_success/get_not_found counts understated it by ~600x
+        # during the 2026-07-26 growth surge (issue #15).
+        get_total = b["gt_ok"] + b["gt_bad"]
+        get_sub_total = b["gt_sub_ok"] + b["gt_sub_bad"]
+        sub_total = b["sub_ok"] + b["sub_bad"]
 
         series.append({
             "t": b["ts"],
             "put_rate": rate_or_none(b["put_ok"], put_total),
-            "get_rate": rate_or_none(b["get_ok"], get_total),
+            "get_rate": rate_or_none(b["gt_ok"], get_total),
+            "get_sub_rate": rate_or_none(b["gt_sub_ok"], get_sub_total),
             "upd_rate": rate_or_none(b["upd_ok"], upd_total),
+            "sub_rate": rate_or_none(b["sub_ok"], sub_total),
             "put_n": put_total,
             "get_n": get_total,
+            "get_sub_n": get_sub_total,
             "upd_n": upd_total,
-            "sub_n": b["sub_ok"],
+            "sub_n": sub_total,
+            # Per-hop routing volume. Deliberately not a success signal.
+            "get_hops_n": b["get_req"] + b["get_nf"],
             "lat_put": p50(b["lat_put"]),
             "lat_get": p50(b["lat_get"]),
             "lat_upd": p50(b["lat_upd"]),
@@ -808,7 +867,9 @@ peer_lifecycle = {}
 pending_ops = {}
 
 # Transaction tracking - store full event sequences for timeline lanes
-# tx_id -> {"op": type, "contract": key, "events": [...], "start_ns": ts, "end_ns": ts, "status": "pending"|"success"|"failed"}
+# tx_id -> {"op": type, "contract": key, "events": [...], "start_ns": ts,
+#           "end_ns": ts, "tx_shape": "open"|"settled"|"partial",
+#           "outcome": measured result or None (see TX_TERMINAL_EVENTS)}
 MAX_TRANSACTIONS = 10000  # Keep last N transactions
 MAX_INITIAL_TRANSACTIONS = 500  # Transactions sent to clients on connect
 transactions = {}  # tx_id -> transaction data
@@ -1192,11 +1253,89 @@ def precompute_propagation_from_db():
         print(f"  {ck[:24]}: {len(p.get('peers', {}))} peers, {ms/1000:.1f}s", flush=True)
 
 
-def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, body_type=None):
+# ── Transaction classification (issue #15) ────────────────────────────────
+#
+# A transaction is described by two independent facts:
+#   tx_shape — what we OBSERVED: 'open' / 'settled' / 'partial'
+#   outcome  — what was MEASURED, and only when tx_shape == 'settled'
+#
+# The pair replaced a single `status` column whose 'complete' value was really
+# "the first event we saw wasn't a start event". Propagation events dominate
+# that case, so ~29M synthetic completions accumulated over 48h and any success
+# rate taken from the column was confidently wrong.
+
+# Events that genuinely START an operation.
+TX_START_EVENTS = {
+    "put_request": "put",
+    "get_request": "get",
+    "update_request": "update",
+    "subscribe_request": "subscribe",
+    "connect_request_sent": "connect",
+}
+
+# Events carrying a MEASURED terminal outcome for the whole operation, as
+# event_type -> (op_type, outcome).
+#
+# get_success / get_not_found are deliberately ABSENT. The core emits them once
+# per HOP, so settling a transaction on one reports a relay's local view as the
+# client's — the exact confusion this issue is about. `get_terminal` is the only
+# event carrying the outcome the requesting client actually saw, and it is
+# handled separately below because its outcome comes from the event body.
+TX_TERMINAL_EVENTS = {
+    "put_success": ("put", "success"),
+    "put_failure": ("put", "failure"),
+    "update_success": ("update", "success"),
+    "update_failure": ("update", "failure"),
+    "subscribe_success": ("subscribe", "success"),
+    "subscribe_not_found": ("subscribe", "not_found"),
+    "subscribe_timeout": ("subscribe", "timeout"),
+    # Legacy alias. No core release in the retention window emits `subscribed`
+    # (the live DB holds zero of them) — it is kept only so a peer running old
+    # code cannot go permanently unsettled, which is the bug this replaces.
+    "subscribed": ("subscribe", "success"),
+    "connect_connected": ("connect", "success"),
+    "connect_rejected": ("connect", "rejected"),
+    "disconnect": ("disconnect", "disconnected"),
+}
+
+TRACKED_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
+
+
+def classify_tx_event(event_type):
+    """Map an event type to (op_type, role) where role is 'start', 'terminal'
+    or None. Kept separate from track_transaction so the classification can be
+    tested directly, and mirrored in js/events.js."""
+    if event_type in TX_START_EVENTS:
+        return TX_START_EVENTS[event_type], "start"
+    if event_type in TX_TERMINAL_EVENTS:
+        return TX_TERMINAL_EVENTS[event_type][0], "terminal"
+    if event_type == "get_terminal":
+        return "get", "terminal"
+    if event_type.startswith("put_"):
+        return "put", None
+    if event_type.startswith("get_"):
+        return "get", None
+    if event_type.startswith("update_"):
+        return "update", None
+    if event_type.startswith("subscribe"):
+        return "subscribe", None
+    if event_type.startswith("connect"):
+        return "connect", None
+    if "broadcast" in event_type:
+        return "broadcast", None
+    parts = event_type.split("_")
+    return (parts[0] if parts else "other"), None
+
+
+def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None,
+                      body_type=None, terminal_outcome=None):
     """Track an event as part of a transaction for timeline lanes.
 
     All events with a valid transaction ID are tracked. Events are grouped by
     transaction ID to show related events together in the timeline.
+
+    `terminal_outcome` supplies the measured result for events that carry it in
+    their body (currently only get_terminal).
     """
     if not tx_id or tx_id == "00000000000000000000000000":
         return  # Skip null transaction IDs
@@ -1204,77 +1343,24 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
     # Use body_type for more specific event type if available (especially for connect events)
     display_event_type = body_type if body_type else event_type
 
-    # Determine operation type from event type prefix
-    op_type = None
-    is_start = False
-    is_end = False
-    status = None
-
-    # Derive op_type from event_type prefix
-    if event_type.startswith("put_"):
-        op_type = "put"
-        if event_type == "put_request":
-            is_start = True
-        elif event_type == "put_success":
-            is_end = True
-            status = "success"
-    elif event_type.startswith("get_"):
-        op_type = "get"
-        if event_type == "get_request":
-            is_start = True
-        elif event_type == "get_success":
-            is_end = True
-            status = "success"
-        elif event_type == "get_not_found":
-            is_end = True
-            status = "not_found"
-    elif event_type.startswith("update_"):
-        op_type = "update"
-        if event_type == "update_request":
-            is_start = True
-        elif event_type == "update_success":
-            is_end = True
-            status = "success"
-    elif event_type.startswith("subscribe"):
-        op_type = "subscribe"
-        if event_type == "subscribe_request":
-            is_start = True
-        elif event_type == "subscribed":
-            is_end = True
-            status = "success"
-    elif event_type.startswith("connect"):
-        op_type = "connect"
-        if event_type == "connect_request_sent":
-            is_start = True
-        elif event_type == "connect_connected":
-            is_end = True
-            status = "success"
-    elif event_type == "disconnect":
-        op_type = "disconnect"
-        is_start = True
-        is_end = True
-        status = "complete"
-    elif "broadcast" in event_type:
-        op_type = "broadcast"
+    op_type, role = classify_tx_event(event_type)
+    is_start = role == "start"
+    is_end = role == "terminal"
+    if is_end:
+        if event_type == "get_terminal":
+            # Outcome comes from the event body; without it we have not
+            # measured anything, so refuse to claim a result.
+            outcome = terminal_outcome
+            if outcome is None:
+                is_end = False
+        else:
+            outcome = TX_TERMINAL_EVENTS[event_type][1]
     else:
-        # For any other event type, use the prefix before underscore as op_type
-        parts = event_type.split("_")
-        op_type = parts[0] if parts else "other"
+        outcome = None
 
-    TRACKED_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
     if op_type not in TRACKED_TX_OPS and tx_id not in transactions:
         return  # Skip noisy transaction types
 
-    # Create or update transaction
-    #
-    # WARNING: "status" is NOT a measured operation outcome, and must not be
-    # read as one. "complete" here is a FALLBACK for any transaction whose
-    # first observed event simply isn't a start event — which is the common
-    # case for propagation events (every update_broadcast_received mints a
-    # "complete" update tx). SUBSCRIBE has no terminal handler at all, so its
-    # transactions stay "pending" forever. Computing a success rate from this
-    # column produces confident, badly wrong numbers. For real client-facing
-    # GET outcomes use the get_terminal event (outcome / is_sub_op / attempts).
     if tx_id not in transactions:
         transactions[tx_id] = {
             "op": op_type or "unknown",
@@ -1282,7 +1368,11 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
             "events": [],
             "start_ns": timestamp,
             "end_ns": None,
-            "status": "pending" if is_start and not is_end else "complete",
+            # 'partial' is the honest default: we have seen an event for this
+            # transaction but neither its start nor a terminal, so we know
+            # nothing about how it ended.
+            "tx_shape": "open" if is_start else "partial",
+            "outcome": None,
         }
         transaction_order.append(tx_id)
         prune_old_transactions()
@@ -1307,10 +1397,14 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
     if timestamp < tx["start_ns"]:
         tx["start_ns"] = timestamp
 
-    # Update end time and status
+    if is_start and tx["tx_shape"] == "partial":
+        tx["tx_shape"] = "open"
+
+    # Update end time and shape/outcome
     if is_end:
         tx["end_ns"] = timestamp
-        tx["status"] = status or "complete"
+        tx["tx_shape"] = "settled"
+        tx["outcome"] = outcome
     elif timestamp > (tx["end_ns"] or 0):
         tx["end_ns"] = timestamp
 
@@ -1326,7 +1420,7 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None, 
     db.upsert_transaction(
         tx_id, tx["op"], tx["contract"], contract_short,
         tx["start_ns"], tx["end_ns"] or tx["start_ns"],
-        tx["status"], duration_ms, len(tx["events"])
+        tx["tx_shape"], tx["outcome"], duration_ms, len(tx["events"])
     )
     if is_end:
         db.compute_flows_for_tx(tx_id)
@@ -1455,12 +1549,16 @@ def process_record(record, store_history=True):
             del pending_ops[tx_id]
         record_metric("put_success", timestamp, _lat, peer_id=event_peer_id)
     elif event_type == "get_request":
-        op_stats["get"]["requests"] += 1
+        # Per-HOP counter. Not a denominator for any success rate.
+        op_stats["get"]["hop_requests"] += 1
         record_metric("get_request", timestamp, peer_id=event_peer_id)
         if tx_id:
             pending_ops[tx_id] = {"op": "get", "start_ns": timestamp}
     elif event_type == "get_success":
-        op_stats["get"]["successes"] += 1
+        # Latency only. This event is per-HOP, so it must never feed a success
+        # rate — but the request->success delta is still the best GET timing
+        # signal available: get_terminal reports elapsed_ms=0 on 99.5% of
+        # successful direct GETs, so it cannot serve as a latency source.
         _lat = None
         if tx_id and tx_id in pending_ops:
             latency_ms = (timestamp - pending_ops[tx_id]["start_ns"]) / 1_000_000
@@ -1472,10 +1570,23 @@ def process_record(record, store_history=True):
             del pending_ops[tx_id]
         record_metric("get_success", timestamp, _lat, peer_id=event_peer_id)
     elif event_type == "get_not_found":
-        op_stats["get"]["not_found"] += 1
+        # Per-HOP counter: one per relay that lacked the contract, so this
+        # tracks route length rather than user-visible failure.
+        op_stats["get"]["hop_not_found"] += 1
         record_metric("get_not_found", timestamp, peer_id=event_peer_id)
         if tx_id and tx_id in pending_ops:
             del pending_ops[tx_id]
+    elif event_type == "get_terminal" and body.get("outcome") is not None:
+        # The client-facing outcome, and the ONLY basis for GET success rates.
+        # An event without an outcome has measured nothing, so it is skipped
+        # rather than counted as a failure — track_transaction refuses to settle
+        # on it for the same reason, and the two must not disagree.
+        _outcome = body["outcome"]
+        _sub = bool(body.get("is_sub_op"))
+        _bucket = op_stats["get"]["term_sub_op" if _sub else "term_direct"]
+        _bucket[_outcome if _outcome in _bucket else "other"] += 1
+        record_metric("get_terminal", timestamp, peer_id=event_peer_id,
+                      outcome=_outcome, is_sub_op=_sub)
     elif event_type == "update_request":
         op_stats["update"]["requests"] += 1
         record_metric("update_request", timestamp, peer_id=event_peer_id)
@@ -1497,9 +1608,17 @@ def process_record(record, store_history=True):
         op_stats["update"]["broadcasts"] += 1
     elif event_type == "subscribe_request":
         op_stats["subscribe"]["requests"] += 1
-    elif event_type == "subscribed":
+    elif event_type in ("subscribe_success", "subscribed"):
+        # `subscribed` is a legacy alias the core no longer emits; keying only
+        # on it pinned every subscribe counter at zero (issue #15).
         op_stats["subscribe"]["successes"] += 1
-        record_metric("subscribed", timestamp, peer_id=event_peer_id)
+        record_metric("subscribe_success", timestamp, peer_id=event_peer_id)
+    elif event_type == "subscribe_not_found":
+        op_stats["subscribe"]["not_found"] += 1
+        record_metric("subscribe_not_found", timestamp, peer_id=event_peer_id)
+    elif event_type == "subscribe_timeout":
+        op_stats["subscribe"]["timeouts"] += 1
+        record_metric("subscribe_timeout", timestamp, peer_id=event_peer_id)
 
     # Handle transfer_completed events for congestion control visualization
     elif event_type == "transfer_completed":
@@ -1998,7 +2117,9 @@ def process_record(record, store_history=True):
     if tx_id and tx_id != "00000000000000000000000000":
         event["tx_id"] = tx_id
         # Track this event as part of the transaction (pass body_type for specific connect events)
-        track_transaction(tx_id, event_type, timestamp, event["peer_id"], contract_key, body_type)
+        track_transaction(tx_id, event_type, timestamp, event["peer_id"], contract_key,
+                          body_type, terminal_outcome=event.get("outcome")
+                          if event_type == "get_terminal" else None)
 
     # Store in history buffer and SQLite DB
     if store_history and event_type in HISTORY_EVENT_TYPES:
@@ -2010,6 +2131,15 @@ def process_record(record, store_history=True):
                 return event  # skip storage, still return for real-time broadcast
         event_history.append(event)
         db.insert_event(event)
+        # Project the client-facing GET outcome into its own small table so
+        # GET health can be aggregated without scanning the events table.
+        if event_type == "get_terminal" and event.get("outcome") is not None:
+            db.insert_get_terminal(
+                timestamp, tx_id or None, event["peer_id"], contract_key,
+                event["outcome"], bool(event.get("is_sub_op")),
+                event.get("attempts"), event.get("hop_count"),
+                event.get("elapsed_ms"),
+            )
         if len(event_history) % 100 == 0:
             prune_old_events()
 
@@ -2039,16 +2169,30 @@ def get_operation_stats():
     update = op_stats["update"]
     subscribe = op_stats["subscribe"]
 
+    direct = get["term_direct"]
+    sub_op = get["term_sub_op"]
+    direct_total = sum(direct.values())
+    sub_op_total = sum(sub_op.values())
+    sub_total = (subscribe["successes"] + subscribe["not_found"]
+                 + subscribe["timeouts"])
+
     return {
         "put": {
             "total": put["requests"],
             "success_rate": calc_rate(put["successes"], put["requests"]),
             "latency": calc_percentiles(put["latencies"]),
         },
+        # GET rates are measured from get_terminal, the client-facing outcome.
+        # The per-hop counts are still reported, under names that cannot be
+        # mistaken for an outcome (issue #15).
         "get": {
-            "total": get["requests"] + get["successes"],  # get_success without get_request
-            "success_rate": calc_rate(get["successes"], get["successes"] + get["not_found"]) if (get["successes"] + get["not_found"]) > 0 else None,
-            "not_found": get["not_found"],
+            "total": direct_total,
+            "success_rate": calc_rate(direct["success"], direct_total) if direct_total else None,
+            "not_found": direct["not_found"],
+            "sub_op_total": sub_op_total,
+            "sub_op_success_rate": calc_rate(sub_op["success"], sub_op_total) if sub_op_total else None,
+            "hop_requests": get["hop_requests"],
+            "hop_not_found": get["hop_not_found"],
             "latency": calc_percentiles(get["latencies"]),
         },
         "update": {
@@ -2058,7 +2202,11 @@ def get_operation_stats():
             "latency": calc_percentiles(update["latencies"]),
         },
         "subscribe": {
-            "total": subscribe["successes"],  # subscribed events
+            "total": sub_total,
+            "requests": subscribe["requests"],
+            "success_rate": calc_rate(subscribe["successes"], sub_total) if sub_total else None,
+            "not_found": subscribe["not_found"],
+            "timeouts": subscribe["timeouts"],
         },
     }
 
@@ -2358,7 +2506,8 @@ def get_transactions_list():
                 "start_ns": tx["start_ns"],
                 "end_ns": tx["end_ns"] or tx["start_ns"],  # Use start if no end yet
                 "duration_ms": duration_ms,
-                "status": tx["status"],
+                "tx_shape": tx["tx_shape"],
+                "outcome": tx["outcome"],
                 "event_count": len(tx["events"]),
                 "events": tx["events"],  # Include full event list for detail view
             })

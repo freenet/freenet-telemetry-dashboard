@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 -- Transactions: replaces transactions dict
+--
+-- tx_shape describes the SHAPE of what we observed, never the result:
+--   'open'    -- a genuine start event was seen, no terminal yet
+--   'settled' -- a genuine terminal event was seen; `outcome` says which
+--   'partial' -- events seen, but neither a start nor a terminal. Propagation
+--                events (update_broadcast_received and friends) land here.
+-- `outcome` is the MEASURED result and is NULL unless tx_shape='settled'.
+-- Success rates must be computed over `outcome`, which is NULL exactly when
+-- nothing was measured, so the wrong query returns no rows rather than a
+-- confident wrong number. This column pair replaced a single `status` column
+-- whose 'complete' value was a fallback for "first event wasn't a start" —
+-- see issue #15.
 CREATE TABLE IF NOT EXISTS transactions (
     tx_id TEXT PRIMARY KEY,
     op TEXT NOT NULL,
@@ -64,9 +76,30 @@ CREATE TABLE IF NOT EXISTS transactions (
     contract_short TEXT,
     start_ns INTEGER NOT NULL,
     end_ns INTEGER,
-    status TEXT DEFAULT 'pending',
+    tx_shape TEXT DEFAULT 'partial',
+    outcome TEXT,
     duration_ms REAL,
     event_count INTEGER DEFAULT 0
+);
+
+-- Client-facing GET outcomes, projected out of the `get_terminal` event.
+--
+-- This is the ONLY event that reports the outcome a GET client actually saw.
+-- get_request/get_success/get_not_found are emitted per HOP, so their ratio
+-- tracks route length, not user-visible success. Kept as its own small table
+-- (~200k rows/day) so GET health can be aggregated without either scanning the
+-- multi-hundred-GB events table or adding an event_type index to it.
+CREATE TABLE IF NOT EXISTS get_terminals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp_ns INTEGER NOT NULL,
+    tx_id TEXT,
+    peer_id TEXT,
+    contract_key TEXT,
+    outcome TEXT NOT NULL,       -- success | not_found | timeout_exhausted | ...
+    is_sub_op INTEGER NOT NULL,  -- 0 = client-issued GET, 1 = sub-operation
+    attempts INTEGER,
+    hop_count INTEGER,
+    elapsed_ms REAL
 );
 
 -- Transaction events: individual events within a transaction
@@ -146,6 +179,7 @@ SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id)",
     "CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_txe_peer_ts ON tx_events(peer_id, event_type, timestamp_ns)",
+    "CREATE INDEX IF NOT EXISTS idx_getterm_ts ON get_terminals(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",
@@ -164,6 +198,7 @@ class TelemetryDB:
         self._tx_buf = {}  # tx_id -> tx tuple (batched upserts)
         self._txe_buf = []  # (tx_id, timestamp_ns, event_type, peer_id)
         self._flow_buf = []
+        self._getterm_buf = []  # client-facing GET outcomes
         self._FLUSH_SIZE = 200
         self._enabled = True  # set to False on persistent errors to degrade gracefully
 
@@ -184,6 +219,59 @@ class TelemetryDB:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         # Only create tables synchronously — indexes are deferred
         self.conn.executescript(SCHEMA_TABLES)
+        self._migrate()
+
+    # Bumped whenever SCHEMA_TABLES changes in a way an existing database has
+    # to be brought forward to. Stored in PRAGMA user_version.
+    SCHEMA_VERSION = 1
+
+    def _migrate(self):
+        """Bring an existing database up to the current schema.
+
+        CREATE TABLE IF NOT EXISTS silently leaves an older table alone, so
+        column changes need doing explicitly. The ALTER statements below are
+        metadata-only in SQLite (>= 3.25 for RENAME COLUMN), so they are
+        instant even on a 100+ GB database.
+
+        Gated on PRAGMA user_version so a restart costs one integer read: the
+        legacy rewrite below scans `transactions`, which has no index on the
+        old column and holds millions of rows.
+        """
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= self.SCHEMA_VERSION:
+            return
+
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(transactions)")}
+
+        # issue #15: `status` conflated "we saw a terminal" with "we saw
+        # anything at all". Split into tx_shape (structure) + outcome (result).
+        if "status" in cols and "tx_shape" not in cols:
+            self.conn.execute(
+                "ALTER TABLE transactions RENAME COLUMN status TO tx_shape")
+        if "outcome" not in cols:
+            self.conn.execute("ALTER TABLE transactions ADD COLUMN outcome TEXT")
+
+        # Rewrite legacy values so the retention window isn't a mix of two
+        # vocabularies. 'success'/'not_found' were genuine measured terminals.
+        # 'complete' was the fallback and is NOT evidence of a terminal, so it
+        # degrades to 'partial' — we truly do not know what happened.
+        t0 = time.time()
+        cur = self.conn.execute("""
+            UPDATE transactions
+               SET outcome = CASE WHEN tx_shape IN ('success', 'not_found')
+                                  THEN tx_shape ELSE outcome END,
+                   tx_shape = CASE tx_shape
+                                  WHEN 'pending' THEN 'open'
+                                  WHEN 'success' THEN 'settled'
+                                  WHEN 'not_found' THEN 'settled'
+                                  ELSE 'partial'
+                              END
+             WHERE tx_shape IN ('pending', 'complete', 'success', 'not_found')
+        """)
+        if cur.rowcount > 0:
+            print(f"[db] migrated {cur.rowcount:,} legacy transaction rows to "
+                  f"tx_shape/outcome in {time.time() - t0:.1f}s", flush=True)
+        self.conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def ensure_indexes(self):
         """Create all indexes. Fast if they already exist, slow for new indexes
@@ -223,14 +311,31 @@ class TelemetryDB:
             self._try_flush()
 
     def upsert_transaction(self, tx_id, op, contract_key, contract_short,
-                           start_ns, end_ns, status, duration_ms, event_count):
-        """Buffer a transaction upsert."""
+                           start_ns, end_ns, tx_shape, outcome, duration_ms,
+                           event_count):
+        """Buffer a transaction upsert.
+
+        `tx_shape` is structural ('open'/'settled'/'partial'); `outcome` is the
+        measured result and must be None unless tx_shape == 'settled'.
+        """
         if not self._enabled:
             return
         self._tx_buf[tx_id] = (
             tx_id, op, contract_key, contract_short,
-            start_ns, end_ns, status, duration_ms, event_count
+            start_ns, end_ns, tx_shape, outcome, duration_ms, event_count
         )
+
+    def insert_get_terminal(self, timestamp_ns, tx_id, peer_id, contract_key,
+                            outcome, is_sub_op, attempts, hop_count, elapsed_ms):
+        """Buffer a client-facing GET outcome for the get_terminals table."""
+        if not self._enabled:
+            return
+        self._getterm_buf.append((
+            timestamp_ns, tx_id, peer_id, contract_key, outcome,
+            1 if is_sub_op else 0, attempts, hop_count, elapsed_ms,
+        ))
+        if len(self._getterm_buf) >= self._FLUSH_SIZE:
+            self._try_flush()
 
     def insert_tx_event(self, tx_id, timestamp_ns, event_type, peer_id):
         """Buffer a transaction event."""
@@ -289,10 +394,12 @@ class TelemetryDB:
             self._tx_buf.clear()
             self._txe_buf.clear()
             self._flow_buf.clear()
+            self._getterm_buf.clear()
 
     def flush(self):
         """Flush all buffered writes to DB in a single transaction."""
-        if not self._event_buf and not self._tx_buf and not self._txe_buf and not self._flow_buf:
+        if (not self._event_buf and not self._tx_buf and not self._txe_buf
+                and not self._flow_buf and not self._getterm_buf):
             return
 
         self.conn.execute("BEGIN")
@@ -308,11 +415,21 @@ class TelemetryDB:
             if self._tx_buf:
                 self.conn.executemany(
                     "INSERT OR REPLACE INTO transactions "
-                    "(tx_id, op, contract_key, contract_short, start_ns, end_ns, status, duration_ms, event_count) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(tx_id, op, contract_key, contract_short, start_ns, end_ns, "
+                    "tx_shape, outcome, duration_ms, event_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     list(self._tx_buf.values()),
                 )
                 self._tx_buf.clear()
+
+            if self._getterm_buf:
+                self.conn.executemany(
+                    "INSERT INTO get_terminals (timestamp_ns, tx_id, peer_id, "
+                    "contract_key, outcome, is_sub_op, attempts, hop_count, elapsed_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._getterm_buf,
+                )
+                self._getterm_buf.clear()
 
             if self._txe_buf:
                 self.conn.executemany(
@@ -423,7 +540,7 @@ class TelemetryDB:
             placeholders = ",".join("?" for _ in ops)
             cur = self.conn.execute(
                 f"SELECT t.tx_id, t.op, t.contract_key, t.contract_short, t.start_ns, "
-                f"t.end_ns, t.status, t.duration_ms, t.event_count "
+                f"t.end_ns, t.tx_shape, t.duration_ms, t.event_count, t.outcome "
                 f"FROM transactions t WHERE t.op IN ({placeholders}) "
                 f"ORDER BY t.start_ns DESC LIMIT ?",
                 (*ops, limit),
@@ -431,7 +548,7 @@ class TelemetryDB:
         else:
             cur = self.conn.execute(
                 "SELECT tx_id, op, contract_key, contract_short, start_ns, end_ns, "
-                "status, duration_ms, event_count "
+                "tx_shape, duration_ms, event_count, outcome "
                 "FROM transactions ORDER BY start_ns DESC LIMIT ?",
                 (limit,),
             )
@@ -466,11 +583,27 @@ class TelemetryDB:
                 "start_ns": row[4],
                 "end_ns": row[5] or row[4],
                 "duration_ms": row[7],
-                "status": row[6],
+                "tx_shape": row[6],
+                "outcome": row[9],
                 "event_count": len(events),
                 "events": events,
             })
         return result
+
+    def get_terminal_buckets(self, since_ns, bucket_ns):
+        """Aggregate client-facing GET outcomes into time buckets.
+
+        Returns rows of (bucket_ts, outcome, is_sub_op, count, median elapsed_ms).
+        Reads the small get_terminals projection rather than the events table,
+        which has no event_type index and is hundreds of GB.
+        """
+        return self.conn.execute(
+            f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
+            "outcome, is_sub_op, COUNT(*), AVG(elapsed_ms) "
+            "FROM get_terminals WHERE timestamp_ns > ? "
+            "GROUP BY bucket, outcome, is_sub_op ORDER BY bucket",
+            (since_ns,),
+        ).fetchall()
 
     def get_events_for_range(self, start_ns, end_ns, contract_key=None, peer_id=None):
         """Get events for particle animation, with per-type budgets.
@@ -1042,10 +1175,10 @@ class TelemetryDB:
                 deleted = 0
                 self.conn.execute("BEGIN")
                 try:
-                    # events/flows both carry an index on timestamp_ns, so the
-                    # subquery seeks straight to the old rows and the outer
-                    # DELETE removes them by primary key.
-                    for table in ("events", "flows"):
+                    # events/flows/get_terminals all carry an index on
+                    # timestamp_ns, so the subquery seeks straight to the old
+                    # rows and the outer DELETE removes them by primary key.
+                    for table in ("events", "flows", "get_terminals"):
                         cur = self.conn.execute(
                             f"DELETE FROM {table} WHERE id IN "
                             f"(SELECT id FROM {table} WHERE timestamp_ns < ? LIMIT ?)",

@@ -79,13 +79,18 @@ export function initMetricsChart(container) {
 
     const labels = series.map(p => new Date(p.t / 1_000_000));
 
-    // Raw rates for tooltips
+    // Raw rates for tooltips.
+    // get_rate is the CLIENT-FACING direct GET success rate, measured from
+    // get_terminal. It used to be derived from the per-hop get_success /
+    // get_not_found counts, which understated it by ~600x (issue #15).
     const rawGet = series.map(p => p.get_rate);
+    const rawGetSub = series.map(p => p.get_sub_rate);
     const rawPut = series.map(p => p.put_rate);
     const rawUpd = series.map(p => p.upd_rate);
 
     // EMA-smoothed rates for display
     const smoothGet = ema(rawGet);
+    const smoothGetSub = ema(rawGetSub);
     const smoothPut = ema(rawPut);
     const smoothUpd = ema(rawUpd);
 
@@ -112,6 +117,24 @@ export function initMetricsChart(container) {
                     yAxisID: 'y',
                     spanGaps: false,
                     order: 2,
+                },
+                {
+                    // Sub-operation GETs fail far more often than direct ones
+                    // (14-40% success vs ~90%). The old per-hop signal hid this
+                    // entirely, so the 2026-07-26 regression was missed.
+                    label: 'GET (sub-op)',
+                    data: smoothGetSub,
+                    borderColor: C.get,
+                    borderDash: [4, 3],
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    pointHitRadius: 12,
+                    tension: 0.35,
+                    fill: false,
+                    yAxisID: 'y',
+                    spanGaps: false,
+                    order: 1,
                 },
                 {
                     label: 'PUT',
@@ -194,6 +217,7 @@ export function initMetricsChart(container) {
                             const lbl = item.dataset.label;
                             let raw, count;
                             if (lbl === 'GET') { raw = rawGet[idx]; count = s.get_n; }
+                            else if (lbl === 'GET (sub-op)') { raw = rawGetSub[idx]; count = s.get_sub_n; }
                             else if (lbl === 'PUT') { raw = rawPut[idx]; count = s.put_n; }
                             else if (lbl === 'UPDATE') { raw = rawUpd[idx]; count = s.upd_n; }
                             if (raw == null) return ` ${lbl}: insufficient data`;
@@ -246,6 +270,7 @@ export function initMetricsChart(container) {
 
     // Store raw data on chart for updates
     chart._rawGet = rawGet;
+    chart._rawGetSub = rawGetSub;
     chart._rawPut = rawPut;
     chart._rawUpd = rawUpd;
     chart._series = series;
@@ -261,15 +286,26 @@ export function updateMetricsChart() {
     const labels = series.map(p => new Date(p.t / 1_000_000));
 
     const rawGet = series.map(p => p.get_rate);
+    const rawGetSub = series.map(p => p.get_sub_rate);
     const rawPut = series.map(p => p.put_rate);
     const rawUpd = series.map(p => p.upd_rate);
 
     chart.data.labels = labels;
-    chart.data.datasets[0].data = ema(rawGet);
-    chart.data.datasets[1].data = ema(rawPut);
-    chart.data.datasets[2].data = ema(rawUpd);
+    // Match datasets by label rather than position: this list has been indexed
+    // positionally before, so inserting a series silently fed one line another
+    // line's data.
+    const byLabel = {
+        'GET': rawGet,
+        'GET (sub-op)': rawGetSub,
+        'PUT': rawPut,
+        'UPDATE': rawUpd,
+    };
+    for (const ds of chart.data.datasets) {
+        if (byLabel[ds.label]) ds.data = ema(byLabel[ds.label]);
+    }
 
     chart._rawGet = rawGet;
+    chart._rawGetSub = rawGetSub;
     chart._rawPut = rawPut;
     chart._rawUpd = rawUpd;
     chart._series = series;
