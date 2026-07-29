@@ -29,8 +29,10 @@ HISTORY_HOURS = 48
 HISTORY_EVENT_TYPES = {
     "put_request", "put_success",
     "get_request", "get_success", "get_not_found", "get_failure",
+    "get_terminal",
     "update_request", "update_success", "update_failure",
     "subscribe_request", "subscribe_success", "subscribe_not_found",
+    "subscribe_timeout",
     "update_broadcast_received", "update_broadcast_applied",
     "update_broadcast_emitted", "broadcast_emitted",
     "update_broadcast_delivery_summary",
@@ -41,6 +43,27 @@ HISTORY_EVENT_TYPES = {
 }
 
 TRACKED_TX_OPS = {"put", "get", "update", "broadcast", "connect", "subscribe"}
+
+# Must mirror TX_START_EVENTS / TX_TERMINAL_EVENTS in ws_server.py. get_success
+# and get_not_found are per-HOP and so are NOT terminals; get_terminal is the
+# client-facing GET outcome and is handled inline (its result is in the body).
+TX_START_EVENTS = {
+    "put_request", "get_request", "update_request",
+    "subscribe_request", "connect_request_sent",
+}
+TX_TERMINAL_EVENTS = {
+    "put_success": "success",
+    "put_failure": "failure",
+    "update_success": "success",
+    "update_failure": "failure",
+    "subscribe_success": "success",
+    "subscribe_not_found": "not_found",
+    "subscribe_timeout": "timeout",
+    "subscribed": "success",  # legacy alias, no longer emitted
+    "connect_connected": "success",
+    "connect_rejected": "rejected",
+    "disconnect": "disconnected",
+}
 
 PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)')
 
@@ -141,7 +164,8 @@ def main():
             contract_short TEXT,
             start_ns INTEGER NOT NULL,
             end_ns INTEGER,
-            status TEXT DEFAULT 'pending',
+            tx_shape TEXT DEFAULT 'partial',
+            outcome TEXT,
             duration_ms REAL,
             event_count INTEGER DEFAULT 0
         );
@@ -287,7 +311,7 @@ def main():
                                     tx_data[tx_id] = {
                                         "op": op, "contract": contract_key,
                                         "start_ns": ts, "end_ns": ts,
-                                        "status": "pending",
+                                        "tx_shape": "partial", "outcome": None,
                                         "events": [],
                                     }
                                 tx = tx_data[tx_id]
@@ -296,10 +320,21 @@ def main():
                                     tx["start_ns"] = ts
                                 if ts > tx["end_ns"]:
                                     tx["end_ns"] = ts
-                                # Detect completion
-                                if display_type in ("put_success", "get_success", "get_not_found",
-                                                    "update_success", "subscribed"):
-                                    tx["status"] = "success"
+                                # Shape/outcome must match ws_server.py. The old
+                                # rule here marked get_not_found as "success"
+                                # and keyed subscribes off the never-emitted
+                                # `subscribed` (issue #15).
+                                if display_type in TX_START_EVENTS:
+                                    if tx["tx_shape"] == "partial":
+                                        tx["tx_shape"] = "open"
+                                elif display_type in TX_TERMINAL_EVENTS:
+                                    tx["tx_shape"] = "settled"
+                                    tx["outcome"] = TX_TERMINAL_EVENTS[display_type]
+                                elif display_type == "get_terminal":
+                                    outcome = body.get("outcome")
+                                    if outcome:
+                                        tx["tx_shape"] = "settled"
+                                        tx["outcome"] = outcome
 
                         stored += 1
 
@@ -344,7 +379,8 @@ def main():
         duration_ms = (tx["end_ns"] - tx["start_ns"]) / 1_000_000 if tx["end_ns"] else None
         tx_rows.append((
             tx_id, tx["op"], tx["contract"], contract_short,
-            tx["start_ns"], tx["end_ns"], tx["status"], duration_ms, len(tx["events"])
+            tx["start_ns"], tx["end_ns"], tx["tx_shape"], tx["outcome"],
+            duration_ms, len(tx["events"])
         ))
 
         for ts, et, pid in tx["events"]:
@@ -367,8 +403,9 @@ def main():
     conn.execute("BEGIN")
     conn.executemany(
         "INSERT OR REPLACE INTO transactions "
-        "(tx_id, op, contract_key, contract_short, start_ns, end_ns, status, duration_ms, event_count) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(tx_id, op, contract_key, contract_short, start_ns, end_ns, tx_shape, "
+        "outcome, duration_ms, event_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         tx_rows,
     )
     conn.executemany(

@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Byte-compile the Python entry points
+        run: python -m py_compile ws_server.py telemetry_db.py backfill_db.py create_indexes.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Parse the browser modules
+        # The dashboard ships plain ES modules with no build step, so a syntax
+        # error would only surface in the browser.
+        #
+        # `node --check <file>` silently passes invalid ES modules on Node 22
+        # (verified: a file containing `let x = ;` exits 0). Feeding the source
+        # on stdin with --input-type=module is the form that actually parses.
+        run: |
+          for f in js/*.js; do
+            node --input-type=module --check < "$f" || { echo "syntax error in $f"; exit 1; }
+          done
