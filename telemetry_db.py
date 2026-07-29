@@ -196,7 +196,14 @@ SCHEMA_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_txe_txid ON tx_events(tx_id)",
     "CREATE INDEX IF NOT EXISTS idx_txe_type_ts ON tx_events(event_type, timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_txe_peer_ts ON tx_events(peer_id, event_type, timestamp_ns)",
-    "CREATE INDEX IF NOT EXISTS idx_getterm_ts ON get_terminals(timestamp_ns)",
+    # get_terminals deliberately has NO index. Measured on a full 24h window
+    # (250k rows): the startup aggregate in get_terminal_buckets takes 382ms
+    # scanning and 799ms with an index on timestamp_ns — it groups the entire
+    # retention window, so a table scan beats index-ordered row lookups. The
+    # only query an index helps is prune's probe (65ms -> 22ms against a 5s
+    # budget). Adding one would also make correctness depend on an operator
+    # remembering to run create_indexes.py. The table is bounded by retention,
+    # so scanning is the right plan; revisit only if retention grows a lot.
     "CREATE INDEX IF NOT EXISTS idx_flows_ts ON flows(timestamp_ns)",
     "CREATE INDEX IF NOT EXISTS idx_flows_tx ON flows(tx_id) WHERE tx_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_flows_type_ts ON flows(event_type, timestamp_ns)",

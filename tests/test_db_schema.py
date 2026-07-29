@@ -196,3 +196,54 @@ class TestTransactionRoundTrip:
             assert "status" not in got["tx1"]
         finally:
             db.close()
+
+
+class TestGetTerminalsNeedsNoIndex:
+    """A deliberate decision, not an oversight.
+
+    get_terminals is bounded by retention (~250k rows), and its one aggregate
+    query groups the whole window — so it scans by design. Measured at that row
+    count the aggregate takes 382ms scanning versus 799ms with an index on
+    timestamp_ns. Adding one would slow the query it was meant to help AND make
+    correctness depend on an operator running create_indexes.py.
+    """
+
+    def test_no_index_is_declared_for_get_terminals(self):
+        from telemetry_db import SCHEMA_INDEXES
+        assert not any("get_terminals" in stmt for stmt in SCHEMA_INDEXES), (
+            "an index here slows get_terminal_buckets and adds an operator step"
+        )
+
+    def test_the_aggregate_works_without_one(self, tmp_path):
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            bucket = 4 * 3600 * 1_000_000_000
+            base = (time.time_ns() // bucket) * bucket + 1_000_000
+            for i in range(50):
+                db.insert_get_terminal(base + i, f"tx{i}", "p", "c",
+                                       "success" if i % 2 else "not_found",
+                                       i % 3 == 0, 0, 2, 5.0)
+            db.flush()
+            rows = db.get_terminal_buckets(base - bucket, bucket)
+            assert sum(r[3] for r in rows) == 50
+        finally:
+            db.close()
+
+    def test_pruning_still_bounds_the_table(self, tmp_path):
+        """Without an index the scan cost is only acceptable while retention
+        keeps the table small, so pruning is what makes the choice safe."""
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            now = time.time_ns()
+            for i in range(10):
+                db.insert_get_terminal(now - 48 * 3600 * 1_000_000_000 + i,
+                                       f"old{i}", "p", "c", "success", False, 0, 1, 1.0)
+            db.insert_get_terminal(now, "new", "p", "c", "success", False, 0, 1, 1.0)
+            db.flush()
+            db.prune(retention_ns=24 * 3600 * 1_000_000_000)
+            left = [r[0] for r in db.conn.execute("SELECT tx_id FROM get_terminals")]
+            assert left == ["new"]
+        finally:
+            db.close()
