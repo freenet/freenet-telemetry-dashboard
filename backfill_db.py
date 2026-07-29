@@ -191,7 +191,7 @@ def main():
     """)
 
     event_buf = []
-    tx_data = {}  # tx_id -> {op, contract, start_ns, end_ns, status, events: [...]}
+    tx_data = {}  # tx_id -> {op, contract, start_ns, end_ns, tx_shape, outcome, events}
     count = 0
     stored = 0
     skipped = 0

@@ -127,6 +127,22 @@ class TestOperationStatsPanel:
         assert stats["sub_op_total"] == 5
         assert stats["sub_op_success_rate"] == 20.0
 
+    def test_a_terminal_with_no_outcome_measures_nothing(self, srv):
+        """Stats and transaction tracking must agree: an event carrying no
+        outcome has measured nothing and must not count as a failure."""
+        t = time.time_ns()
+        for i in range(6):
+            feed(srv, "get_terminal", t + i, tx_id=f"ok-{i}",
+                 outcome="success", is_sub_op=False)
+        for i in range(20):
+            # No `outcome` key at all.
+            feed(srv, "get_terminal", t + 1000 + i, tx_id=f"none-{i}", is_sub_op=False)
+
+        stats = srv.get_operation_stats()["get"]
+        assert stats["total"] == 6, "outcome-less terminals must not be counted"
+        assert stats["success_rate"] == 100.0
+        assert series_of(srv)["get_rate"] == 100.0
+
     def test_unknown_outcome_counts_without_inflating_success(self, srv):
         t = time.time_ns()
         for i in range(5):

@@ -63,6 +63,38 @@ class TestMigrationFromTheOldStatusColumn:
         assert got["t3"] == ("settled", "success")
         assert got["t4"] == ("settled", "not_found")
 
+    def test_migration_runs_once_and_is_recorded(self, tmp_path):
+        """The legacy rewrite scans a table with millions of rows, so it must
+        not run again on every restart."""
+        p = str(tmp_path / "legacy.db")
+        self.make_legacy_db(p)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            assert db.conn.execute("PRAGMA user_version").fetchone()[0] == \
+                TelemetryDB.SCHEMA_VERSION
+        finally:
+            db.close()
+
+        # Plant a value the migration WOULD rewrite. If it survives the next
+        # open, the rewrite genuinely did not run again. (A sentinel the
+        # migration ignores would survive either way and prove nothing.)
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            db.conn.execute(
+                "UPDATE transactions SET tx_shape = 'complete' WHERE tx_id = 't1'")
+        finally:
+            db.close()
+        db = TelemetryDB(p)
+        db.open()
+        try:
+            shape = db.conn.execute(
+                "SELECT tx_shape FROM transactions WHERE tx_id='t1'").fetchone()[0]
+            assert shape == "complete", "migration re-ran after it was recorded"
+        finally:
+            db.close()
+
     def test_migration_is_idempotent(self, tmp_path):
         p = str(tmp_path / "legacy.db")
         self.make_legacy_db(p)

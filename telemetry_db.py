@@ -221,24 +221,33 @@ class TelemetryDB:
         self.conn.executescript(SCHEMA_TABLES)
         self._migrate()
 
+    # Bumped whenever SCHEMA_TABLES changes in a way an existing database has
+    # to be brought forward to. Stored in PRAGMA user_version.
+    SCHEMA_VERSION = 1
+
     def _migrate(self):
         """Bring an existing database up to the current schema.
 
         CREATE TABLE IF NOT EXISTS silently leaves an older table alone, so
-        column changes need doing explicitly. Both ALTER statements below are
+        column changes need doing explicitly. The ALTER statements below are
         metadata-only in SQLite (>= 3.25 for RENAME COLUMN), so they are
         instant even on a 100+ GB database.
+
+        Gated on PRAGMA user_version so a restart costs one integer read: the
+        legacy rewrite below scans `transactions`, which has no index on the
+        old column and holds millions of rows.
         """
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= self.SCHEMA_VERSION:
+            return
+
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(transactions)")}
-        if not cols:
-            return  # table absent entirely; executescript above will have made it
 
         # issue #15: `status` conflated "we saw a terminal" with "we saw
         # anything at all". Split into tx_shape (structure) + outcome (result).
         if "status" in cols and "tx_shape" not in cols:
             self.conn.execute(
                 "ALTER TABLE transactions RENAME COLUMN status TO tx_shape")
-            cols.add("tx_shape")
         if "outcome" not in cols:
             self.conn.execute("ALTER TABLE transactions ADD COLUMN outcome TEXT")
 
@@ -246,26 +255,23 @@ class TelemetryDB:
         # vocabularies. 'success'/'not_found' were genuine measured terminals.
         # 'complete' was the fallback and is NOT evidence of a terminal, so it
         # degrades to 'partial' — we truly do not know what happened.
-        legacy = self.conn.execute(
-            "SELECT COUNT(*) FROM transactions "
-            "WHERE tx_shape IN ('pending', 'complete', 'success', 'not_found')"
-        ).fetchone()[0]
-        if legacy:
-            t0 = time.time()
-            self.conn.execute("""
-                UPDATE transactions
-                   SET outcome = CASE WHEN tx_shape IN ('success', 'not_found')
-                                      THEN tx_shape ELSE outcome END,
-                       tx_shape = CASE tx_shape
-                                      WHEN 'pending' THEN 'open'
-                                      WHEN 'success' THEN 'settled'
-                                      WHEN 'not_found' THEN 'settled'
-                                      ELSE 'partial'
-                                  END
-                 WHERE tx_shape IN ('pending', 'complete', 'success', 'not_found')
-            """)
-            print(f"[db] migrated {legacy:,} legacy transaction rows to "
+        t0 = time.time()
+        cur = self.conn.execute("""
+            UPDATE transactions
+               SET outcome = CASE WHEN tx_shape IN ('success', 'not_found')
+                                  THEN tx_shape ELSE outcome END,
+                   tx_shape = CASE tx_shape
+                                  WHEN 'pending' THEN 'open'
+                                  WHEN 'success' THEN 'settled'
+                                  WHEN 'not_found' THEN 'settled'
+                                  ELSE 'partial'
+                              END
+             WHERE tx_shape IN ('pending', 'complete', 'success', 'not_found')
+        """)
+        if cur.rowcount > 0:
+            print(f"[db] migrated {cur.rowcount:,} legacy transaction rows to "
                   f"tx_shape/outcome in {time.time() - t0:.1f}s", flush=True)
+        self.conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def ensure_indexes(self):
         """Create all indexes. Fast if they already exist, slow for new indexes

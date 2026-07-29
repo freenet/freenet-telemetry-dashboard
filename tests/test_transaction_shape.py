@@ -104,6 +104,24 @@ class TestGetOutcomeComesFromTheClientTerminal:
         assert tx["outcome"] == "success"
 
 
+class TestNoPhantomTransactionGrowth:
+    """The issue is partly about phantom rows, so classification must not start
+    tracking event types that were previously ignored."""
+
+    @pytest.mark.parametrize("event_type", [
+        "unsubscribed", "seeding_started", "seeding_stopped",
+        "peer_startup", "peer_shutdown", "transfer_completed",
+    ])
+    def test_untracked_events_do_not_create_transactions(self, srv, event_type):
+        srv.track_transaction("tx-new", event_type, 100, "peer-a")
+        assert "tx-new" not in srv.transactions
+
+    def test_untracked_events_still_attach_to_an_existing_transaction(self, srv):
+        track(srv, "subscribe_request", "tx-x", ts=100)
+        srv.track_transaction("tx-x", "unsubscribed", 200, "peer-a")
+        assert len(srv.transactions["tx-x"]["events"]) == 2
+
+
 class TestInvariants:
     def test_outcome_is_set_only_when_settled(self, srv):
         """The whole point of the split: a result exists only when measured."""

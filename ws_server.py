@@ -1317,7 +1317,7 @@ def classify_tx_event(event_type):
         return "get", None
     if event_type.startswith("update_"):
         return "update", None
-    if event_type.startswith("subscribe") or event_type in ("unsubscribed",):
+    if event_type.startswith("subscribe"):
         return "subscribe", None
     if event_type.startswith("connect"):
         return "connect", None
@@ -1576,9 +1576,12 @@ def process_record(record, store_history=True):
         record_metric("get_not_found", timestamp, peer_id=event_peer_id)
         if tx_id and tx_id in pending_ops:
             del pending_ops[tx_id]
-    elif event_type == "get_terminal":
+    elif event_type == "get_terminal" and body.get("outcome") is not None:
         # The client-facing outcome, and the ONLY basis for GET success rates.
-        _outcome = body.get("outcome")
+        # An event without an outcome has measured nothing, so it is skipped
+        # rather than counted as a failure — track_transaction refuses to settle
+        # on it for the same reason, and the two must not disagree.
+        _outcome = body["outcome"]
         _sub = bool(body.get("is_sub_op"))
         _bucket = op_stats["get"]["term_sub_op" if _sub else "term_direct"]
         _bucket[_outcome if _outcome in _bucket else "other"] += 1
