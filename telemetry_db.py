@@ -621,7 +621,7 @@ class TelemetryDB:
             })
         return result
 
-    def get_terminal_buckets(self, since_ns, bucket_ns):
+    def get_terminal_buckets(self, since_ns, bucket_ns, until_ns=None):
         """Aggregate client-facing GET outcomes into time buckets.
 
         Returns rows of (bucket_ts, outcome, is_sub_op, count, mean elapsed_ms).
@@ -630,13 +630,25 @@ class TelemetryDB:
         get_request -> get_success delta instead.
         Reads the small get_terminals projection rather than the events table,
         which has no event_type index and is hundreds of GB.
+
+        `until_ns`, when given, excludes rows with a bogus future timestamp
+        (e.g. sim/CI telemetry hitting this same prod endpoint) — one such
+        row is enough to stretch the metrics chart's time axis across months.
         """
+        if until_ns is None:
+            return self.conn.execute(
+                f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
+                "outcome, is_sub_op, COUNT(*), AVG(elapsed_ms) "
+                "FROM get_terminals WHERE timestamp_ns > ? "
+                "GROUP BY bucket, outcome, is_sub_op ORDER BY bucket",
+                (since_ns,),
+            ).fetchall()
         return self.conn.execute(
             f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
             "outcome, is_sub_op, COUNT(*), AVG(elapsed_ms) "
-            "FROM get_terminals WHERE timestamp_ns > ? "
+            "FROM get_terminals WHERE timestamp_ns > ? AND timestamp_ns <= ? "
             "GROUP BY bucket, outcome, is_sub_op ORDER BY bucket",
-            (since_ns,),
+            (since_ns, until_ns),
         ).fetchall()
 
     def get_events_for_range(self, start_ns, end_ns, contract_key=None, peer_id=None):

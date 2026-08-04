@@ -526,6 +526,11 @@ op_stats = {
 METRICS_BUCKET_NS = 4 * 60 * 60 * 1_000_000_000    # 4 hours
 METRICS_MAX_AGE_NS = 8 * 24 * 60 * 60 * 1_000_000_000  # 8 days
 METRICS_MIN_SAMPLES = 5  # Minimum ops in a bucket to compute a meaningful rate
+# Tolerate ordinary clock skew, but reject wildly-future timestamps (seen from
+# sim/CI telemetry hitting this same prod endpoint) before they can create a
+# bucket months or years out — a single such bucket stretches the chart's time
+# axis and squeezes all real data into a sliver at one edge.
+METRICS_MAX_FUTURE_SKEW_NS = 60 * 60 * 1_000_000_000  # 1 hour
 # Each bucket: {ts, put_req, put_ok, get_req, get_nf (per-HOP volume),
 #               gt_ok/gt_bad + gt_sub_ok/gt_sub_bad (client-facing GET outcomes),
 #               upd_req, upd_ok, sub_ok, sub_bad, peers, lat_put, lat_get, lat_upd}
@@ -579,6 +584,9 @@ def _get_or_create_bucket(timestamp_ns):
     return _current_bucket
 
 
+_future_skew_drops = 0
+
+
 def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None,
                   outcome=None, is_sub_op=False):
     """Record an operation into the current time bucket.
@@ -586,6 +594,13 @@ def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None,
     `outcome`/`is_sub_op` apply to get_terminal, the only GET event that
     reports what the requesting client actually saw.
     """
+    global _future_skew_drops
+    if timestamp_ns - int(time.time() * 1_000_000_000) > METRICS_MAX_FUTURE_SKEW_NS:
+        _future_skew_drops += 1
+        if _future_skew_drops % 500 == 1:
+            print(f"[metrics] Dropped {_future_skew_drops} events with future/bogus "
+                  f"timestamps so far (e.g. {event_type} from {peer_id})", flush=True)
+        return
     b = _get_or_create_bucket(timestamp_ns)
     if peer_id:
         b["reporting_peers"].add(peer_id)
@@ -639,6 +654,7 @@ def precompute_metrics_from_db():
     import time as _time
     now_ns = int(_time.time() * 1_000_000_000)
     cutoff_ns = now_ns - METRICS_MAX_AGE_NS  # 8 days
+    future_cutoff_ns = now_ns + METRICS_MAX_FUTURE_SKEW_NS
 
     # get_terminal is absent here on purpose: tx_events has no outcome column,
     # so GET success is precomputed from the get_terminals table below.
@@ -657,11 +673,11 @@ def precompute_metrics_from_db():
     rows = db.conn.execute(f"""
         SELECT event_type, {bucket_expr} as bucket, COUNT(*) as cnt
         FROM tx_events
-        WHERE timestamp_ns > ?
+        WHERE timestamp_ns > ? AND timestamp_ns <= ?
         AND event_type IN ({placeholders})
         GROUP BY event_type, bucket
         ORDER BY bucket
-    """, (cutoff_ns, *metric_event_types)).fetchall()
+    """, (cutoff_ns, future_cutoff_ns, *metric_event_types)).fetchall()
 
     # Map event_type -> bucket field name for bulk updates
     _type_to_field = {
@@ -683,7 +699,7 @@ def precompute_metrics_from_db():
     # outcome and is_sub_op that tx_events cannot carry.
     try:
         for bucket_ts, outcome, is_sub_op, count, _avg_ms in db.get_terminal_buckets(
-                cutoff_ns, METRICS_BUCKET_NS):
+                cutoff_ns, METRICS_BUCKET_NS, until_ns=future_cutoff_ns):
             total_events += count
             b = _get_or_create_bucket(bucket_ts)
             ok = outcome == "success"
@@ -1393,8 +1409,14 @@ def track_transaction(tx_id, event_type, timestamp, peer_id, contract_key=None,
     if not tx_id or tx_id == "00000000000000000000000000":
         return  # Skip null transaction IDs
 
-    # Use body_type for more specific event type if available (especially for connect events)
-    display_event_type = body_type if body_type else event_type
+    # Use body_type for more specific event type only for connect events (its body
+    # type distinguishes start_connection/connected/finished). For every other op,
+    # attrs-level event_type is already the specific, canonical name (put_request,
+    # update_success, ...) — unconditionally preferring body_type collapsed those
+    # into generic "request"/"success" labels shared across put/update, which made
+    # tx_events unusable for reconstructing put/update history (precompute above
+    # queries for 'put_request' etc. and finds nothing).
+    display_event_type = body_type if (event_type == "connect" and body_type) else event_type
 
     op_type, role = classify_tx_event(event_type)
     is_start = role == "start"
