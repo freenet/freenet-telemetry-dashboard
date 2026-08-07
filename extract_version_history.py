@@ -8,14 +8,43 @@ suitable for the dashboard to build version rollout timeseries.
 import json
 import os
 import glob
+import re
 import time
 
 TELEMETRY_DIR = "/mnt/media/freenet-telemetry"
 OUTPUT_FILE = "/var/www/freenet-dashboard/version_history.json"
 
+PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)')
 
-def process_file(filepath, lifecycle):
-    """Process a single OTLP JSON log file for peer_startup/shutdown events."""
+
+def parse_peer_ip(peer_str):
+    """Extract IP from a peer string like 'abc123@1.2.3.4:5678 (@ 0.5)'."""
+    if not peer_str:
+        return None
+    match = PEER_PATTERN.search(peer_str)
+    return match.group(2) if match else None
+
+
+def is_public_ip(ip):
+    """Check if IP is a public (non-test) address. Mirrors ws_server.is_public_ip."""
+    if not ip:
+        return False
+    if ip.startswith("127.") or ip.startswith("172.") or ip.startswith("10.") or ip.startswith("192.168."):
+        return False
+    if ip.startswith("0.") or ip == "localhost":
+        return False
+    return True
+
+
+def process_file(filepath, lifecycle, peer_ips):
+    """Process a single OTLP JSON log file for peer_startup/shutdown events.
+
+    Also records any IP seen for a peer_id (from any event type, not just
+    peer_startup/shutdown which carry no IP) into `peer_ips`, so the caller
+    can filter out CI/simulated-network test peers (Docker loopback
+    addresses) before writing the version history — matching the production
+    filter ws_server.py applies to the live "Versions" panel.
+    """
     count = 0
     events = 0
     with open(filepath, 'r') as f:
@@ -36,16 +65,7 @@ def process_file(filepath, lifecycle):
                                 v = a.get("value", {})
                                 attrs[k] = v.get("stringValue") or v.get("doubleValue") or v.get("intValue", "")
 
-                            event_type = attrs.get("event_type", "")
-                            if event_type not in ("peer_startup", "peer_shutdown"):
-                                continue
-
                             peer_id = attrs.get("peer_id", "")
-                            if not peer_id:
-                                continue
-
-                            timestamp = record.get("timeUnixNano", "0")
-                            timestamp = int(timestamp) if isinstance(timestamp, str) else timestamp
 
                             # Parse body (JSON string in stringValue)
                             body = {}
@@ -57,6 +77,22 @@ def process_file(filepath, lifecycle):
                                         body = json.loads(body_str)
                                     except:
                                         pass
+
+                            if peer_id and peer_id not in peer_ips:
+                                for field in ("this_peer", "requester", "target"):
+                                    ip = parse_peer_ip(body.get(field, ""))
+                                    if ip:
+                                        peer_ips[peer_id] = ip
+                                        break
+
+                            event_type = attrs.get("event_type", "")
+                            if event_type not in ("peer_startup", "peer_shutdown"):
+                                continue
+                            if not peer_id:
+                                continue
+
+                            timestamp = record.get("timeUnixNano", "0")
+                            timestamp = int(timestamp) if isinstance(timestamp, str) else timestamp
 
                             if event_type == "peer_startup":
                                 version = body.get("version", "unknown")
@@ -87,6 +123,7 @@ def main():
     print(f"Found {len(log_files)} log files")
 
     lifecycle = {}
+    peer_ips = {}
     total_records = 0
     total_events = 0
 
@@ -95,14 +132,23 @@ def main():
         size_mb = os.path.getsize(filepath) / 1e6
         print(f"  [{i+1}/{len(log_files)}] {fname} ({size_mb:.0f}MB)...", end="", flush=True)
         t0 = time.time()
-        records, events = process_file(filepath, lifecycle)
+        records, events = process_file(filepath, lifecycle, peer_ips)
         elapsed = time.time() - t0
         total_records += records
         total_events += events
         print(f" {records} records, {events} lifecycle events ({elapsed:.1f}s)")
 
     print(f"\nTotal: {total_records} records, {total_events} lifecycle events")
-    print(f"Unique peers with version data: {len(lifecycle)}")
+    print(f"Unique peers with version data (pre-filter): {len(lifecycle)}")
+
+    # Drop peers never seen on a public IP (CI / simulated-network-test runs,
+    # which use Docker loopback addresses) so they can't masquerade as a real
+    # version rollout on the dashboard.
+    dropped = [pid for pid in lifecycle if not is_public_ip(peer_ips.get(pid))]
+    for pid in dropped:
+        del lifecycle[pid]
+    print(f"Dropped {len(dropped)} non-public-IP (CI/test) peers")
+    print(f"Unique production peers with version data: {len(lifecycle)}")
 
     version_counts = {}
     for data in lifecycle.values():

@@ -798,7 +798,15 @@ def get_version_rollout():
         sd = entry[2] if len(entry) > 2 else None
         peers.append((v, st, sd))
 
+    # Only count peers we've seen on a public IP elsewhere in the telemetry
+    # stream — mirrors the "production_peer_ids" filter in get_network_state().
+    # peer_startup itself carries no IP, so without this, CI/simulated-network
+    # test runs (Docker peers on 127.x.x.x loopback addresses, often pinned to
+    # an old test-harness version) show up here as a bogus version spike.
+    production_peer_ids = {pid for pid, ip in attrs_peer_id_to_ip.items() if is_public_ip(ip)}
     for pid, data in peer_lifecycle.items():
+        if pid not in production_peer_ids:
+            continue
         v = data.get("version", "unknown")
         st = data.get("startup_time")
         if st:
