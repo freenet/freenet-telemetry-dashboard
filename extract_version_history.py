@@ -25,6 +25,23 @@ def parse_peer_ip(peer_str):
     return match.group(2) if match else None
 
 
+def canonical_peer_id(raw):
+    """Extract the stable bare ID from an attrs `peer_id` string.
+
+    The telemetry `peer_id` attribute is the peer's Display-formatted
+    self-descriptor, "ID@IP:PORT (@ LOC)", where IP:PORT is whatever the
+    peer believes its own local address is AT THE MOMENT of that event
+    (e.g. 127.0.0.1/0.0.0.0 at startup, before it learns its public
+    address). That suffix is not stable across events for the same peer,
+    so using the raw string as a dict key fragments one peer into many
+    never-matching keys — mirrors ws_server.canonical_peer_id.
+    """
+    if not raw:
+        return raw
+    match = PEER_PATTERN.search(raw)
+    return match.group(1) if match else raw
+
+
 def is_public_ip(ip):
     """Check if IP is a public (non-test) address. Mirrors ws_server.is_public_ip."""
     if not ip:
@@ -65,7 +82,7 @@ def process_file(filepath, lifecycle, peer_ips):
                                 v = a.get("value", {})
                                 attrs[k] = v.get("stringValue") or v.get("doubleValue") or v.get("intValue", "")
 
-                            peer_id = attrs.get("peer_id", "")
+                            peer_id = canonical_peer_id(attrs.get("peer_id", ""))
 
                             # Parse body (JSON string in stringValue)
                             body = {}

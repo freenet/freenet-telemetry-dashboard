@@ -989,6 +989,24 @@ def parse_peer_string(peer_str):
     return None, None, None
 
 
+def canonical_peer_id(raw: str) -> str:
+    """Extract the stable bare ID from an attrs `peer_id` string.
+
+    That attribute is the peer's Display-formatted self-descriptor,
+    "ID@IP:PORT (@ LOC)", where IP:PORT is whatever the peer believes its
+    own local address is AT THE MOMENT of that specific event — e.g.
+    127.0.0.1/0.0.0.0 at startup before it learns its public address, or an
+    ephemeral bind for a given stream. That suffix is not stable across
+    events for the same peer, so using the raw string as an identity key
+    (peer_lifecycle, attrs_peer_id_to_ip, restart detection, ...) silently
+    fragments one peer into many never-matching keys. Extract just the ID.
+    """
+    if not raw:
+        return raw
+    match = PEER_PATTERN.search(raw)
+    return match.group(1) if match else raw
+
+
 def prune_old_events():
     """Remove events older than MAX_HISTORY_AGE_NS."""
     now_ns = int(time.time() * 1_000_000_000)
@@ -1575,7 +1593,7 @@ def process_record(record, store_history=True):
 
     # Get peer_id and IP for state tracking
     # Check multiple fields that might contain peer info: this_peer, requester, target
-    event_peer_id = attrs.get("peer_id") or ""
+    event_peer_id = canonical_peer_id(attrs.get("peer_id") or "")
     event_peer_ip = None
     for peer_field in ["this_peer", "requester", "target"]:
         peer_str = body.get(peer_field, "")
@@ -1768,7 +1786,7 @@ def process_record(record, store_history=True):
     # Handle new subscription tree telemetry events (v0.1.70+)
     # Each event is reported by a specific peer - we track state per (contract, peer)
     # Get the reporting peer's ID from attrs or body
-    reporting_peer = attrs.get("peer_id") or ""
+    reporting_peer = canonical_peer_id(attrs.get("peer_id") or "")
     if not reporting_peer:
         # Try to extract from this_peer if available
         this_peer_str = body.get("this_peer", "")
@@ -1874,7 +1892,7 @@ def process_record(record, store_history=True):
         # Track peer startup with version/arch/OS info
         # Note: peer_startup doesn't have IP info, so we store unconditionally
         # and filter later when building topology/stats
-        peer_id = attrs.get("peer_id", "")
+        peer_id = canonical_peer_id(attrs.get("peer_id", ""))
         if peer_id:
             version_str = body.get("version", "unknown")
             peer_lifecycle[peer_id] = {
@@ -1890,7 +1908,7 @@ def process_record(record, store_history=True):
             record_version(version_str, timestamp)
     elif event_type == "peer_shutdown":
         # Track peer shutdown
-        peer_id = attrs.get("peer_id", "")
+        peer_id = canonical_peer_id(attrs.get("peer_id", ""))
         if peer_id and peer_id in peer_lifecycle:
             peer_lifecycle[peer_id]["shutdown_time"] = timestamp
             peer_lifecycle[peer_id]["graceful"] = body.get("graceful", False)
@@ -1906,7 +1924,7 @@ def process_record(record, store_history=True):
 
     # Extract peer info
     # Use attrs peer_id for "this" peer (matches lifecycle peer_id)
-    attrs_peer_id = attrs.get("peer_id", "")
+    attrs_peer_id = canonical_peer_id(attrs.get("peer_id", ""))
     parsed_peer_id, this_ip, this_loc = parse_peer_string(body.get("this_peer", ""))
 
     other_peer_id, other_ip, other_loc = None, None, None
