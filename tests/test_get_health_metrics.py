@@ -504,6 +504,95 @@ class TestOperationStatsSplitsLocalFromRouted:
         assert stats["routed_not_found"] == 3
 
 
+class TestPutAndUpdateAreVolumeNotSuccess:
+    """PUT/UPDATE terminals are minted per HOP, so no client-visible rate can be
+    derived from them — the reasoning SUBSCRIBE has always had applied.
+
+    Their published ratios were inverted, not merely noisy. UPDATE read 0.0-0.1%
+    (update_request fires ~1,553x per transaction) while updates propagated
+    fine. PUT computed 148.6% / 147.5% / 134.2% in 6 of 8 buckets, drawn against
+    a hardcoded max of 100, so it rendered pinned flat at the top — a broken
+    measurement displaying as perfect health, which is worse than an obviously
+    wrong number. Fixing properly needs freenet-core#5250.
+    """
+
+    def test_no_put_or_update_rate_is_published(self, srv):
+        t = time.time_ns()
+        for i in range(40):
+            feed(srv, "put_request", t + i, tx_id=f"p-{i}")
+        for i in range(60):  # more successes than requests: the >100% shape
+            feed(srv, "put_success", t + 100 + i, tx_id=f"p-{i % 40}")
+        for i in range(30):
+            feed(srv, "update_request", t + 200 + i, tx_id=f"u-{i}")
+        feed(srv, "update_success", t + 300, tx_id="u-0")
+
+        point = series_of(srv)
+        for gone in ("put_rate", "upd_rate", "put_n", "upd_n"):
+            assert gone not in point, (
+                f"{gone!r} is a per-hop ratio presented as an outcome"
+            )
+
+    def test_the_impossible_put_ratio_is_not_published_anywhere(self, srv):
+        """60 successes over 40 requests is 150%. No published value may be it."""
+        t = time.time_ns()
+        for i in range(40):
+            feed(srv, "put_request", t + i, tx_id=f"p-{i}")
+        for i in range(60):
+            feed(srv, "put_success", t + 100 + i, tx_id=f"p-{i % 40}")
+
+        point = series_of(srv)
+        rates = [v for k, v in point.items() if k.endswith("_rate") and v is not None]
+        assert not any(v > 100 for v in rates), f"a published rate exceeds 100%: {rates}"
+        assert 150.0 not in rates
+
+    def test_volume_is_still_reported_under_hop_names(self, srv):
+        t = time.time_ns()
+        for i in range(40):
+            feed(srv, "put_request", t + i, tx_id=f"p-{i}")
+        for i in range(60):
+            feed(srv, "put_success", t + 100 + i, tx_id=f"p-{i % 40}")
+        for i in range(30):
+            feed(srv, "update_request", t + 200 + i, tx_id=f"u-{i}")
+
+        point = series_of(srv)
+        assert point["put_hops_n"] == 40
+        assert point["put_hops_ok"] == 60
+        assert point["upd_hops_n"] == 30
+        # Every PUT/UPDATE key exposed must carry the hop caveat in its name.
+        for k in point:
+            if k.startswith(("put", "upd")):
+                assert "hops" in k, f"{k!r} does not say it is a per-hop count"
+
+    def test_the_chart_draws_them_on_a_separate_uncapped_axis(self):
+        """A count on a 0-100 axis is how 148.6% rendered as flat healthy."""
+        import os
+        js = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "js", "metrics.js")
+        with open(js, encoding="utf-8") as f:
+            src = f.read()
+        assert "'PUT hops'" in src and "'UPDATE hops'" in src
+        # Assert the DATASETS are bound to the volume axis, not merely that the
+        # axis is declared somewhere. A first version of this pin checked only
+        # `"yVol" in src`, and passed when every dataset was pointed back at the
+        # 0-100 success axis — the exact regression it exists to catch.
+        for label in ("PUT hops", "UPDATE hops"):
+            block = src[src.index(f"label: '{label}'"):]
+            block = block[:block.index("},")]
+            assert "yAxisID: 'yVol'" in block, (
+                f"the {label} dataset is drawn on the success-% axis"
+            )
+        # The volume axis must not be capped. Match the actual property
+        # (`max: <number>`), not the bare word — the block's own comment
+        # explains that there is no max, and a needle its explanation
+        # satisfies would fire on the correct code.
+        import re
+        vol = src[src.index("yVol: {"):]
+        vol = vol[:vol.index("\n                y: {")]
+        assert not re.search(r"^\s*max:\s*\d", vol, re.M), (
+            "capping a count reproduces the original defect"
+        )
+
+
 class TestSubscribeHasNoSuccessRate:
     """issue #15 follow-up: SUBSCRIBE has no client-facing terminal event.
 

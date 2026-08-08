@@ -210,8 +210,15 @@ export function initMetricsChart(container) {
     // near 95% while routed GETs were succeeding 8.5% of the time.
     const rawGet = series.map(p => p.get_routed_rate);
     const rawGetSub = series.map(p => p.get_sub_rate);
-    const rawPut = series.map(p => p.put_rate);
-    const rawUpd = series.map(p => p.upd_rate);
+    // PUT and UPDATE are per-HOP event VOLUME, on their own right-hand axis.
+    // They used to be plotted as "success %", which was not merely imprecise
+    // but inverted: UPDATE read 0.0-0.1% while updates propagated fine, and
+    // PUT computed up to 148.6% — drawn against a hardcoded max of 100, so it
+    // rendered pinned flat at the top and looked like perfect health. There is
+    // no honest rate to draw until the core emits a client-facing terminal for
+    // these ops (freenet-core#5250), so they ship as volume.
+    const rawPut = series.map(p => p.put_hops_n);
+    const rawUpd = series.map(p => p.upd_hops_n);
 
     // EMA-smoothed rates for display
     const smoothGet = ema(rawGet);
@@ -264,7 +271,9 @@ export function initMetricsChart(container) {
                     order: 1,
                 },
                 {
-                    label: 'PUT',
+                    // Volume, on the right-hand axis. Labelled "hops" so it
+                    // cannot be misread as an outcome.
+                    label: 'PUT hops',
                     data: smoothPut,
                     borderColor: C.put,
                     backgroundColor: C.put + '12',
@@ -274,12 +283,12 @@ export function initMetricsChart(container) {
                     pointHitRadius: 12,
                     tension: 0.35,
                     fill: true,
-                    yAxisID: 'y',
+                    yAxisID: 'yVol',
                     spanGaps: false,
                     order: 3,
                 },
                 {
-                    label: 'UPDATE',
+                    label: 'UPDATE hops',
                     data: smoothUpd,
                     borderColor: C.update,
                     backgroundColor: C.update + '12',
@@ -289,7 +298,7 @@ export function initMetricsChart(container) {
                     pointHitRadius: 12,
                     tension: 0.35,
                     fill: true,
-                    yAxisID: 'y',
+                    yAxisID: 'yVol',
                     spanGaps: false,
                     order: 4,
                 },
@@ -343,10 +352,19 @@ export function initMetricsChart(container) {
                             // Show raw (unsmoothed) value + sample count
                             const lbl = item.dataset.label;
                             let raw, count;
+                            // PUT/UPDATE are volume, so they report a count and
+                            // never a percentage — returning early keeps them out
+                            // of the "%" formatting below entirely.
+                            if (lbl === 'PUT hops') {
+                                return ` PUT: ${NUM.format(s.put_hops_n || 0)} hop events `
+                                     + `(${NUM.format(s.put_hops_ok || 0)} succeeded per-hop; not a client rate)`;
+                            }
+                            if (lbl === 'UPDATE hops') {
+                                return ` UPDATE: ${NUM.format(s.upd_hops_n || 0)} hop events `
+                                     + `(${NUM.format(s.upd_hops_ok || 0)} succeeded per-hop; not a client rate)`;
+                            }
                             if (lbl === 'GET (routed)') { raw = rawGet[idx]; count = s.get_routed_n; }
                             else if (lbl === 'GET (sub-op)') { raw = rawGetSub[idx]; count = s.get_sub_n; }
-                            else if (lbl === 'PUT') { raw = rawPut[idx]; count = s.put_n; }
-                            else if (lbl === 'UPDATE') { raw = rawUpd[idx]; count = s.upd_n; }
                             if (raw == null) return ` ${lbl}: insufficient data`;
                             const line = ` ${lbl}: ${raw}% (${count} ops)`;
                             if (lbl !== 'GET (routed)') return line;
@@ -385,13 +403,34 @@ export function initMetricsChart(container) {
                     },
                     border: { display: false },
                 },
+                yVol: {
+                    position: 'right',
+                    min: 0,
+                    // Deliberately uncapped: this is a count, and capping a
+                    // count is how the PUT line came to render 148.6% as a
+                    // flat, healthy-looking line against a hardcoded 100.
+                    title: {
+                        display: true,
+                        text: 'hop events',
+                        color: C.textMuted,
+                        font: { size: 9, family: "'IBM Plex Mono', monospace" },
+                    },
+                    grid: { display: false },
+                    ticks: {
+                        color: C.textMuted,
+                        font: { size: 9, family: "'IBM Plex Mono', monospace" },
+                        callback: v => (v >= 1000 ? (v / 1000) + 'k' : v),
+                        maxTicksLimit: 5,
+                    },
+                    border: { display: false },
+                },
                 y: {
                     position: 'left',
                     min: 0,
                     max: 100,
                     title: {
                         display: true,
-                        text: 'success %',
+                        text: 'GET success %',
                         color: C.textMuted,
                         font: { size: 9, family: "'IBM Plex Mono', monospace" },
                     },
@@ -427,8 +466,8 @@ export function updateMetricsChart() {
 
     const rawGet = series.map(p => p.get_routed_rate);
     const rawGetSub = series.map(p => p.get_sub_rate);
-    const rawPut = series.map(p => p.put_rate);
-    const rawUpd = series.map(p => p.upd_rate);
+    const rawPut = series.map(p => p.put_hops_n);
+    const rawUpd = series.map(p => p.upd_hops_n);
 
     // The summary above the chart is a 24h aggregate, so it has to be rebuilt
     // on refresh too — a stale headline is the failure mode this panel is
@@ -443,8 +482,8 @@ export function updateMetricsChart() {
     const byLabel = {
         'GET (routed)': rawGet,
         'GET (sub-op)': rawGetSub,
-        'PUT': rawPut,
-        'UPDATE': rawUpd,
+        'PUT hops': rawPut,
+        'UPDATE hops': rawUpd,
     };
     for (const ds of chart.data.datasets) {
         if (byLabel[ds.label]) ds.data = ema(byLabel[ds.label]);
