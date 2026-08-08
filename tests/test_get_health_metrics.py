@@ -354,6 +354,50 @@ class TestLocalHitsDoNotDiluteTheRoutedRate:
         assert live["get_local_n"] == 300
 
 
+class TestTheSplitterChoiceIsRecordedAndDefensible:
+    """freenet-core #4852 P2 switched its OWN split from `attempts` to
+    `hop_count`, because a loopback LocalCompletion bumps `requests_sent`
+    without a network round-trip. The `attempts` doc comment core exports was
+    never updated and still recommends the split core abandoned.
+
+    We still split on `attempts`, because hop_count is not populated in this
+    telemetry (224,736 NULL / 242 zero / 2 non-zero over ~24h) and because the
+    loopback case is empirically absent — the populations separate by latency
+    with an empty band between them. That is a real judgement against a real
+    counter-argument, so it is written down where the next person will look.
+    """
+
+    def test_the_hop_count_rationale_is_recorded_next_to_the_classifier(self):
+        import inspect
+
+        import telemetry_db
+        src = inspect.getsource(telemetry_db)
+        head, _, tail = src.partition("ROUTE_CLASS_SQL = (")
+        assert tail, "ROUTE_CLASS_SQL moved; this pin no longer bounds anything"
+        # Bound the search to the comment block immediately above the constant.
+        block = head[head.rindex("ROUTE_LOCAL"):]
+        for needle in ("hop_count", "4852", "LocalCompletion"):
+            assert needle in block, (
+                f"the reason we split on attempts rather than hop_count "
+                f"({needle!r}) is no longer recorded beside the classifier"
+            )
+
+    def test_a_zero_millisecond_success_at_attempts_one_would_be_a_loopback(self, srv):
+        """The shape that would invalidate the choice, asserted as a live check.
+
+        This does not fail today — it documents what to look for. If real
+        traffic ever produces attempts>=1 successes at ~0 ms, they are loopback
+        completions and the routed rate is being inflated by them.
+        """
+        t = time.time_ns()
+        for i in range(10):
+            feed(srv, "get_terminal", t + i, tx_id=f"g-{i}",
+                 outcome="success", attempts=1, elapsed_ms=0)
+        # Counted as routed, because attempts says so. If production ever looks
+        # like this fixture, revisit the classifier — see telemetry_db.
+        assert series_of(srv)["get_routed_n"] == 10
+
+
 class TestOperationStatsSplitsLocalFromRouted:
     def test_local_hits_are_not_in_the_routed_rate(self, srv):
         t = time.time_ns()

@@ -119,12 +119,26 @@
             min-width: 168px;
         }
 
+        .get-health-aside-head {
+            font-family: var(--font-mono);
+            font-size: 0.64em;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+        }
+
         .get-health-aside-row {
             display: flex;
             justify-content: space-between;
             gap: 12px;
             font-family: var(--font-mono);
             font-size: 0.72em;
+        }
+
+        .get-health-aside-row em {
+            font-style: normal;
+            opacity: 0.65;
         }
 
         .get-health-aside-row .label { color: var(--text-muted); }

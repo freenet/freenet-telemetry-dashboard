@@ -642,6 +642,33 @@ class TelemetryDB:
     # first peer answered; `0` is the convention for a LOCAL-cache hit that never
     # routed to the network ... letting analysts split 'all client GET successes'
     # (attempts >= 0) from 'network GET findability' (attempts >= 1)".
+    #
+    # WHY NOT hop_count. freenet-core itself stopped splitting on `attempts` in
+    # #4852 P2: `summarize_client_get_outcomes` (core `tracing.rs`) now splits on
+    # `hop_count >= 1`, because a loopback `LocalCompletion` bumps `requests_sent`
+    # (so attempts >= 1) with no network round-trip and would be over-counted as a
+    # network success. The doc comment quoted above predates that and was never
+    # updated, so it still recommends the split core abandoned. Both facts are
+    # real. We still use `attempts` here, for two measured reasons:
+    #
+    #   1. hop_count is not populated in this telemetry. Over ~24h of direct
+    #      GETs: 224,736 NULL, 242 zero, 2 non-zero. Splitting on `hop_count >= 1`
+    #      would report 2 network GETs out of 225k. It is unusable as a splitter,
+    #      whatever its semantics.
+    #   2. The loopback contamination that motivated core's switch is absent from
+    #      this data, and latency proves it. A LocalCompletion has no network
+    #      round-trip, so it must be ~0 ms. The populations separate with an EMPTY
+    #      band between them: attempts=0 tops out at 15 ms (213,461 of 213,744
+    #      under 1 ms), and attempts>=1 successes start at 60 ms — zero rows below
+    #      50 ms, zero rows in between. If loopbacks were landing in attempts>=1
+    #      they would show up as ~0 ms successes there. There are none.
+    #
+    # That same separation also rules out a version-skew reading: a release that
+    # emitted attempts=0 for a GET that really routed would appear as a slow
+    # attempts=0 row, and there are none.
+    #
+    # If hop_count ever starts being populated, prefer it — it is the more direct
+    # signal and core's reasoning is sound. Re-check the latency separation first.
     ROUTE_CLASS_SQL = (
         "CASE WHEN attempts IS NULL THEN 'unknown' "
         "WHEN attempts = 0 THEN 'local' ELSE 'network' END"

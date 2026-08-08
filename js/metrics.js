@@ -123,27 +123,34 @@ function renderGetSummary(series) {
     const toShare = pct(t.routedTimeout, t.routed);
     const breakdown = t.routed
         ? `not found ${nfShare}% &middot; timed out ${toShare}%`
-        : 'no routed GETs in this window';
+        : 'nothing routed in this window';
 
+    // The denominator is spelled out in the label and restated under the
+    // number. The old metric was arithmetically correct and still misleading,
+    // because nothing on screen said what it was dividing by; a reader had no
+    // way to notice that most of the denominator could not fail. Naming the
+    // population, its size, and what was excluded (with the reason) is what
+    // makes that class of error hard to repeat.
     el.innerHTML = `
         <div class="get-health-main">
-            <div class="get-health-label">Network GET success <span class="get-health-window">last 24h</span></div>
+            <div class="get-health-label">GET success &mdash; network-routed only<span class="get-health-window">last 24h</span></div>
             <div class="get-health-rate ${rateClass(routedRate)}">${
                 routedRate == null ? '&mdash;' : routedRate + '%'
             }</div>
-            <div class="get-health-sub">${NUM.format(t.routed)} routed &middot; ${breakdown}</div>
+            <div class="get-health-sub">of ${NUM.format(t.routed)} GETs that contacted a peer &middot; ${breakdown}</div>
         </div>
         <div class="get-health-aside">
+            <div class="get-health-aside-head">Excluded from the rate</div>
             <div class="get-health-aside-row">
-                <span class="label">Local cache hits</span>
+                <span class="label">Local cache hits <em>cannot fail</em></span>
                 <span class="val">${NUM.format(t.local)}</span>
             </div>
             <div class="get-health-aside-row">
-                <span class="label">Sub-op GETs</span>
+                <span class="label">Sub-op GETs <em>internal</em></span>
                 <span class="val">${NUM.format(t.subOp)}</span>
             </div>
             ${t.unknown ? `<div class="get-health-aside-row warnrow">
-                <span class="label">Unclassified</span>
+                <span class="label">Unclassified <em>rate undercounts</em></span>
                 <span class="val">${NUM.format(t.unknown)}</span>
             </div>` : ''}
         </div>`;
