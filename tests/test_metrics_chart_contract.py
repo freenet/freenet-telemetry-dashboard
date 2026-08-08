@@ -42,8 +42,8 @@ def test_every_series_key_the_chart_reads_is_emitted(srv):
 
 
 @pytest.mark.parametrize("key", [
-    "get_rate", "get_sub_rate", "put_rate", "upd_rate",
-    "get_n", "get_sub_n", "put_n", "upd_n",
+    "get_routed_rate", "get_sub_rate", "put_rate", "upd_rate",
+    "get_routed_n", "get_sub_n", "put_n", "upd_n",
 ])
 def test_chart_keys_are_present(srv, key):
     t = time.time_ns()

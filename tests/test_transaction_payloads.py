@@ -105,13 +105,14 @@ class TestGetTerminalsPersistEndToEnd:
         t = time.time_ns()
         for i in range(6):
             srv.process_record(make_record("get_terminal", t + i, tx_id=f"g-{i}",
-                                           outcome="success", is_sub_op=False))
+                                           outcome="success", is_sub_op=False,
+                                           attempts=1))
         srv.db.flush()
         # Wipe the in-memory buckets: this is the post-restart path.
         srv.metrics_buckets.clear()
         srv._current_bucket = None
         srv.precompute_metrics_from_db()
-        assert srv.get_metrics_timeseries()["series"][-1]["get_rate"] == 100.0
+        assert srv.get_metrics_timeseries()["series"][-1]["get_routed_rate"] == 100.0
 
     @pytest.mark.parametrize("outcome", ["success", "not_found", "timeout_exhausted"])
     def test_no_row_is_written_without_an_outcome(self, srv, outcome):

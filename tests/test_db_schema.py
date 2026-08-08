@@ -155,10 +155,58 @@ class TestGetTerminalsTable:
             db.flush()
 
             rows = db.get_terminal_buckets(base - bucket, bucket)
-            agg = {(r[1], r[2]): r[3] for r in rows}
-            assert agg[("success", 0)] == 7
-            assert agg[("timeout_exhausted", 1)] == 3
+            # (outcome, is_sub_op, route_class) -> count. route_class is not
+            # optional detail: attempts=0 above means those 7 successes were
+            # local-store hits that never routed.
+            agg = {(r[1], r[2], r[3]): r[4] for r in rows}
+            assert agg[("success", 0, "local")] == 7
+            assert agg[("timeout_exhausted", 1, "network")] == 3
             assert len({r[0] for r in rows}) == 1, "all samples share one bucket"
+        finally:
+            db.close()
+
+    def test_attempts_is_classified_local_network_or_unknown(self, tmp_path):
+        """The split the GET success rate depends on, at its source."""
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            bucket = 4 * 3600 * 1_000_000_000
+            base = (time.time_ns() // bucket) * bucket + 1_000_000
+            db.insert_get_terminal(base, "loc", "p", "c", "success", False, 0, 1, 0.0)
+            db.insert_get_terminal(base + 1, "net1", "p", "c", "success", False, 1, 2, 40.0)
+            db.insert_get_terminal(base + 2, "net9", "p", "c", "not_found", False, 9, 4, 900.0)
+            db.insert_get_terminal(base + 3, "unk", "p", "c", "success", False, None, None, 0.0)
+            db.flush()
+
+            rows = {(r[1], r[3]): r[4]
+                    for r in db.get_terminal_buckets(base - bucket, bucket)}
+            assert rows == {
+                ("success", "local"): 1,      # attempts=0 never left the machine
+                ("success", "network"): 1,    # attempts=1 routed to one peer
+                ("not_found", "network"): 1,  # attempts=9 routed to nine
+                ("success", "unknown"): 1,    # attempts absent: unmeasured
+            }
+        finally:
+            db.close()
+
+    def test_route_class_helper_matches_the_sql(self, tmp_path):
+        """The live counters classify in Python and the rebuild classifies in
+        SQL. If they disagree, a restart silently rewrites history."""
+        db = TelemetryDB(str(tmp_path / "t.db"))
+        db.open()
+        try:
+            bucket = 4 * 3600 * 1_000_000_000
+            base = (time.time_ns() // bucket) * bucket + 1_000_000
+            for i, attempts in enumerate([0, 1, 2, 17, None]):
+                db.insert_get_terminal(base + i, f"t{i}", "p", "c", "success",
+                                       False, attempts, 1, 0.0)
+            db.flush()
+            by_tx = {r[0]: r[1] for r in db.conn.execute(
+                f"SELECT tx_id, {TelemetryDB.ROUTE_CLASS_SQL} FROM get_terminals")}
+            for i, attempts in enumerate([0, 1, 2, 17, None]):
+                assert by_tx[f"t{i}"] == TelemetryDB.route_class(attempts), (
+                    f"SQL and Python disagree for attempts={attempts}"
+                )
         finally:
             db.close()
 
@@ -269,8 +317,9 @@ class TestGetTerminalsNeedsNoIndex:
                                        i % 3 == 0, 0, 2, 5.0)
             db.flush()
             rows = db.get_terminal_buckets(base - bucket, bucket)
-            assert sum(r[3] for r in rows) == 50
+            assert sum(r[4] for r in rows) == 50
             assert {r[1] for r in rows} == {"success", "not_found"}
+            assert {r[3] for r in rows} == {"local"}, "inserted with attempts=0"
         finally:
             db.close()
 

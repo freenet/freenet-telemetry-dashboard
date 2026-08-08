@@ -42,11 +42,116 @@
             min-height: 300px;
             position: relative;
             padding: 4px 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .metrics-canvas-wrap {
+            flex: 1;
+            min-height: 220px;
+            position: relative;
         }
 
         .metrics-chart-container canvas {
             width: 100% !important;
             height: 100% !important;
+        }
+
+        /* ── GET health summary (routed vs local-hit split) ── */
+        .get-health {
+            display: flex;
+            align-items: stretch;
+            gap: 14px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+        }
+
+        .get-health-main {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .get-health-label {
+            font-family: var(--font-mono);
+            font-size: 0.72em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+        }
+
+        .get-health-window {
+            font-weight: 400;
+            text-transform: none;
+            letter-spacing: 0;
+            color: var(--text-muted);
+            margin-left: 6px;
+        }
+
+        .get-health-rate {
+            font-family: var(--font-mono);
+            font-size: 1.9em;
+            font-weight: 600;
+            line-height: 1.15;
+            color: var(--text-primary);
+        }
+
+        .get-health-rate.good { color: var(--color-get); }
+        .get-health-rate.warn { color: var(--color-put); }
+        .get-health-rate.bad  { color: var(--color-error); }
+
+        .get-health-sub {
+            font-family: var(--font-mono);
+            font-size: 0.72em;
+            color: var(--text-muted);
+        }
+
+        .get-health-aside {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 4px;
+            padding-left: 14px;
+            border-left: 1px solid var(--border-color);
+            min-width: 168px;
+        }
+
+        .get-health-aside-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            font-family: var(--font-mono);
+            font-size: 0.72em;
+        }
+
+        .get-health-aside-row .label { color: var(--text-muted); }
+        .get-health-aside-row .val { color: var(--text-secondary); }
+        .get-health-aside-row.warnrow .val { color: var(--color-error); }
+
+        .get-health-note {
+            font-size: 0.7em;
+            line-height: 1.5;
+            color: var(--text-muted);
+            padding: 8px 2px 2px 2px;
+        }
+
+        .get-health-note code {
+            font-family: var(--font-mono);
+            font-size: 0.95em;
+            color: var(--text-secondary);
+        }
+
+        @media (max-width: 768px) {
+            .get-health { flex-direction: column; gap: 8px; }
+            .get-health-aside {
+                padding-left: 0;
+                border-left: none;
+                border-top: 1px solid var(--border-color);
+                padding-top: 8px;
+            }
         }
 
         /* Ensure the panel stretches for the chart */

@@ -510,16 +510,38 @@ def get_propagation_data():
 #   term_*                         — client-facing outcomes from get_terminal,
 #                                    split by direct vs sub-operation. These are
 #                                    the only ones a success rate may use.
+#
+# `term_direct` is split AGAIN, by whether the GET actually routed:
+#   term_direct_net — attempts >= 1. Left the machine, so it could fail. This is
+#                     the network-health population and the only honest headline.
+#   term_direct_loc — attempts == 0. Served from the local store; cannot fail,
+#                     and was 95% of direct GETs on 2026-08-08. A rate over
+#                     net+loc read 95.4% while the routed rate was 8.5%.
+#   term_direct_unk — attempts absent. Measured neither, so it is reported as
+#                     its own count rather than folded into either rate.
 op_stats = {
     "put": {"requests": 0, "successes": 0, "latencies": []},
     "get": {
         "hop_requests": 0, "hop_not_found": 0,
-        "term_direct": {"success": 0, "not_found": 0, "other": 0},
-        "term_sub_op": {"success": 0, "not_found": 0, "other": 0},
+        "term_direct_net": {"success": 0, "not_found": 0,
+                            "timeout_exhausted": 0, "other": 0},
+        "term_direct_loc": {"success": 0, "not_found": 0,
+                            "timeout_exhausted": 0, "other": 0},
+        "term_direct_unk": {"success": 0, "not_found": 0,
+                            "timeout_exhausted": 0, "other": 0},
+        "term_sub_op": {"success": 0, "not_found": 0,
+                        "timeout_exhausted": 0, "other": 0},
         "latencies": [],
     },
     "update": {"requests": 0, "successes": 0, "broadcasts": 0, "latencies": []},
     "subscribe": {"requests": 0, "successes": 0, "not_found": 0, "timeouts": 0},
+}
+
+# TelemetryDB.route_class(...) -> the op_stats["get"] sub-dict it belongs in.
+_DIRECT_STAT_BUCKET = {
+    TelemetryDB.ROUTE_NETWORK: "term_direct_net",
+    TelemetryDB.ROUTE_LOCAL: "term_direct_loc",
+    TelemetryDB.ROUTE_UNKNOWN: "term_direct_unk",
 }
 
 # ── Time-series metrics (4-hour buckets, kept for 8 days) ──
@@ -532,7 +554,7 @@ METRICS_MIN_SAMPLES = 5  # Minimum ops in a bucket to compute a meaningful rate
 # axis and squeezes all real data into a sliver at one edge.
 METRICS_MAX_FUTURE_SKEW_NS = 60 * 60 * 1_000_000_000  # 1 hour
 # Each bucket: {ts, put_req, put_ok, get_req, get_nf (per-HOP volume),
-#               gt_ok/gt_bad + gt_sub_ok/gt_sub_bad (client-facing GET outcomes),
+#               gt (client-facing GET outcomes, keyed by population),
 #               upd_req, upd_ok, sub_ok, sub_bad, peers, lat_put, lat_get, lat_upd}
 metrics_buckets = {}       # bucket_key -> bucket dict (dict for O(1) lookup by timestamp)
 _current_bucket = None     # the bucket we're currently filling
@@ -572,9 +594,14 @@ def _get_or_create_bucket(timestamp_ns):
         "put_req": 0, "put_ok": 0,
         # get_req/get_nf are per-HOP counts, kept for routing volume only.
         "get_req": 0, "get_nf": 0,
-        # Client-facing GET outcomes from get_terminal, split direct vs sub-op.
-        "gt_ok": 0, "gt_bad": 0,
-        "gt_sub_ok": 0, "gt_sub_bad": 0,
+        # Client-facing GET outcomes from get_terminal, as a
+        # (population, outcome) -> count map. `population` is one of
+        # direct_network / direct_local / direct_unknown / sub_op_*, i.e. the
+        # direct-vs-sub-op split crossed with TelemetryDB.route_class. Kept as
+        # one map rather than a fixed set of gt_* scalars so that adding an
+        # outcome cannot silently land in a bucket that already means something
+        # else, and so the populations always sum back to the raw event count.
+        "gt": {},
         "upd_req": 0, "upd_ok": 0,
         "sub_ok": 0, "sub_bad": 0,
         "reporting_peers": set(),
@@ -587,12 +614,25 @@ def _get_or_create_bucket(timestamp_ns):
 _future_skew_drops = 0
 
 
+def gt_population(is_sub_op, attempts):
+    """Name the get_terminal population a sample belongs to.
+
+    Two independent splits, and both matter:
+      direct vs sub_op — whether a client asked for this GET at all.
+      network vs local — whether it was routed. A local hit (attempts == 0)
+                         never left the machine and has no failure mode, so it
+                         must not share a denominator with routed GETs.
+    """
+    kind = "sub_op" if is_sub_op else "direct"
+    return f"{kind}_{TelemetryDB.route_class(attempts)}"
+
+
 def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None,
-                  outcome=None, is_sub_op=False):
+                  outcome=None, is_sub_op=False, attempts=None):
     """Record an operation into the current time bucket.
 
-    `outcome`/`is_sub_op` apply to get_terminal, the only GET event that
-    reports what the requesting client actually saw.
+    `outcome`/`is_sub_op`/`attempts` apply to get_terminal, the only GET event
+    that reports what the requesting client actually saw.
     """
     global _future_skew_drops
     if timestamp_ns - int(time.time() * 1_000_000_000) > METRICS_MAX_FUTURE_SKEW_NS:
@@ -619,11 +659,8 @@ def record_metric(event_type, timestamp_ns, latency_ms=None, peer_id=None,
         if latency_ms is not None:
             b["lat_get"].append(latency_ms)
     elif event_type == "get_terminal":
-        ok = outcome == "success"
-        if is_sub_op:
-            b["gt_sub_ok" if ok else "gt_sub_bad"] += 1
-        else:
-            b["gt_ok" if ok else "gt_bad"] += 1
+        key = (gt_population(is_sub_op, attempts), outcome)
+        b["gt"][key] = b["gt"].get(key, 0) + 1
     elif event_type == "update_request":
         b["upd_req"] += 1
     elif event_type == "update_success":
@@ -698,15 +735,16 @@ def precompute_metrics_from_db():
     # Client-facing GET outcomes come from their own table, which stores the
     # outcome and is_sub_op that tx_events cannot carry.
     try:
-        for bucket_ts, outcome, is_sub_op, count, _avg_ms in db.get_terminal_buckets(
+        for (bucket_ts, outcome, is_sub_op, route_class, count,
+             _avg_ms) in db.get_terminal_buckets(
                 cutoff_ns, METRICS_BUCKET_NS, until_ns=future_cutoff_ns):
             total_events += count
             b = _get_or_create_bucket(bucket_ts)
-            ok = outcome == "success"
-            if is_sub_op:
-                b["gt_sub_ok" if ok else "gt_sub_bad"] += count
-            else:
-                b["gt_ok" if ok else "gt_bad"] += count
+            # SQL already classified `attempts`; keep its answer rather than
+            # re-deriving one, so the rebuilt series cannot disagree with the
+            # live one about which GETs were routed.
+            key = (f"{'sub_op' if is_sub_op else 'direct'}_{route_class}", outcome)
+            b["gt"][key] = b["gt"].get(key, 0) + count
     except Exception as e:
         print(f"[metrics] get_terminal precompute skipped: {e}", flush=True)
 
@@ -736,17 +774,41 @@ def get_metrics_timeseries():
         b = metrics_buckets[key]
         put_total = b["put_req"] or b["put_ok"]
         upd_total = b["upd_req"] or b["upd_ok"]
+
         # GET success is measured from get_terminal only. Deriving it from the
         # per-hop get_success/get_not_found counts understated it by ~600x
         # during the 2026-07-26 growth surge (issue #15).
-        get_total = b["gt_ok"] + b["gt_bad"]
-        get_sub_total = b["gt_sub_ok"] + b["gt_sub_bad"]
+        #
+        # ...and then split by whether the GET was ROUTED. A local-store hit
+        # (attempts == 0) never touches the network and so cannot fail; it was
+        # 95% of direct GETs, which pinned the published rate near 95% while
+        # network-routed GET success sat at 8.5%. The routed population is the
+        # headline; the local one ships beside it as a cache-hit count, which is
+        # what it actually is.
+        gt = b["gt"]
+
+        def pop(population, outcome):
+            return gt.get((population, outcome), 0)
+
+        def pop_total(population):
+            return sum(n for (p, _o), n in gt.items() if p == population)
+
+        net_total = pop_total("direct_network")
+        loc_total = pop_total("direct_local")
+        unk_total = pop_total("direct_unknown")
+        get_sub_total = (pop_total("sub_op_network") + pop_total("sub_op_local")
+                         + pop_total("sub_op_unknown"))
+        sub_ok = (pop("sub_op_network", "success") + pop("sub_op_local", "success")
+                  + pop("sub_op_unknown", "success"))
 
         series.append({
             "t": b["ts"],
             "put_rate": rate_or_none(b["put_ok"], put_total),
-            "get_rate": rate_or_none(b["gt_ok"], get_total),
-            "get_sub_rate": rate_or_none(b["gt_sub_ok"], get_sub_total),
+            # Deliberately NOT named get_rate. The old key meant "direct GETs,
+            # routed or not"; a consumer still reading it should break loudly
+            # rather than silently keep plotting a differently-scoped number.
+            "get_routed_rate": rate_or_none(pop("direct_network", "success"), net_total),
+            "get_sub_rate": rate_or_none(sub_ok, get_sub_total),
             "upd_rate": rate_or_none(b["upd_ok"], upd_total),
             # No sub_rate. SUBSCRIBE has no client-facing terminal event, so
             # subscribe_success/_not_found are minted per hop on the response
@@ -754,9 +816,23 @@ def get_metrics_timeseries():
             # made GET read 0.05% against a real 87% (issue #15). There is no
             # arithmetic that fixes it, so the counts ship without a rate.
             "put_n": put_total,
-            "get_n": get_total,
+            "get_routed_n": net_total,
             "get_sub_n": get_sub_total,
             "upd_n": upd_total,
+            # Why routed GETs failed. not_found and timeout_exhausted imply
+            # different problems (findability/placement vs routing/transport),
+            # so a single failure rate would average away which one is biting.
+            "get_routed_nf_n": pop("direct_network", "not_found"),
+            "get_routed_timeout_n": pop("direct_network", "timeout_exhausted"),
+            # Local-store hits: a CACHE-HIT count, not a network measure. Kept
+            # visible so the routed denominator's smallness is explicable
+            # (routed n is ~5% of client GETs) rather than looking like data loss.
+            "get_local_n": loc_total,
+            "get_local_ok": pop("direct_local", "success"),
+            # Terminals whose `attempts` was absent, so neither rate can claim
+            # them. Expected to be 0; a non-zero value means peers stopped
+            # reporting the field and the routed rate is undercounting.
+            "get_unknown_n": unk_total,
             # Per-hop volumes. Deliberately not success signals.
             "sub_hops_ok": b["sub_ok"],
             "sub_hops_bad": b["sub_bad"],
@@ -1693,10 +1769,18 @@ def process_record(record, store_history=True):
         # on it for the same reason, and the two must not disagree.
         _outcome = body["outcome"]
         _sub = bool(body.get("is_sub_op"))
-        _bucket = op_stats["get"]["term_sub_op" if _sub else "term_direct"]
+        # `attempts` decides whether this GET touched the network at all, so it
+        # has to reach the counters — a rate that cannot see it is the 95%-vs-8.5%
+        # defect. Read with .get(): absent means unmeasured, not zero, and zero
+        # is the meaningful value for a local hit.
+        _attempts = body.get("attempts")
+        _bucket = op_stats["get"][
+            "term_sub_op" if _sub else _DIRECT_STAT_BUCKET[
+                TelemetryDB.route_class(_attempts)]
+        ]
         _bucket[_outcome if _outcome in _bucket else "other"] += 1
         record_metric("get_terminal", timestamp, peer_id=event_peer_id,
-                      outcome=_outcome, is_sub_op=_sub)
+                      outcome=_outcome, is_sub_op=_sub, attempts=_attempts)
     elif event_type == "update_request":
         op_stats["update"]["requests"] += 1
         record_metric("update_request", timestamp, peer_id=event_peer_id)
@@ -2279,9 +2363,13 @@ def get_operation_stats():
     update = op_stats["update"]
     subscribe = op_stats["subscribe"]
 
-    direct = get["term_direct"]
+    net = get["term_direct_net"]
+    loc = get["term_direct_loc"]
+    unk = get["term_direct_unk"]
     sub_op = get["term_sub_op"]
-    direct_total = sum(direct.values())
+    net_total = sum(net.values())
+    loc_total = sum(loc.values())
+    unk_total = sum(unk.values())
     sub_op_total = sum(sub_op.values())
     return {
         "put": {
@@ -2289,13 +2377,24 @@ def get_operation_stats():
             "success_rate": calc_rate(put["successes"], put["requests"]),
             "latency": calc_percentiles(put["latencies"]),
         },
-        # GET rates are measured from get_terminal, the client-facing outcome.
-        # The per-hop counts are still reported, under names that cannot be
-        # mistaken for an outcome (issue #15).
+        # GET rates are measured from get_terminal, the client-facing outcome
+        # (issue #15), and only over ROUTED GETs. Every key that carries a rate
+        # names its population, because the un-named version of this — a plain
+        # `total`/`success_rate` over routed and local hits together — is what
+        # published 95% against a real 8.5%. The per-hop counts stay too, under
+        # names that cannot be mistaken for an outcome.
         "get": {
-            "total": direct_total,
-            "success_rate": calc_rate(direct["success"], direct_total) if direct_total else None,
-            "not_found": direct["not_found"],
+            "routed_total": net_total,
+            "routed_success_rate": calc_rate(net["success"], net_total) if net_total else None,
+            "routed_not_found": net["not_found"],
+            "routed_timeout_exhausted": net["timeout_exhausted"],
+            # Local-store hits. Reported as a count, not folded into any rate:
+            # these never reached the network, so they have no failure mode and
+            # measure cache behaviour rather than network health.
+            "local_hit_total": loc_total,
+            "local_hit_success": loc["success"],
+            # Terminals with no `attempts`; unclassifiable, so counted alone.
+            "unclassified_total": unk_total,
             "sub_op_total": sub_op_total,
             "sub_op_success_rate": calc_rate(sub_op["success"], sub_op_total) if sub_op_total else None,
             "hop_requests": get["hop_requests"],

@@ -106,6 +106,17 @@ CREATE TABLE IF NOT EXISTS transactions (
 -- tracks route length, not user-visible success. Kept as its own small table
 -- (~200k rows/day) so GET health can be aggregated without either scanning the
 -- multi-hundred-GB events table or adding an event_type index to it.
+--
+-- `attempts` is load-bearing and must be split on before any rate is computed:
+--   attempts = 0   -- LOCAL store hit. The GET never left the machine, so it
+--                     cannot fail. 100.00% success over 213,787 samples in the
+--                     24h to 2026-08-08, and 0 ms at p50/p90/p99.
+--   attempts >= 1  -- NETWORK-ROUTED. This is the only population that measures
+--                     whether the network can serve a request.
+-- Local hits are ~95% of direct GETs, so a rate over the union is ~95% no
+-- matter how badly the network is doing — it read 95.4% on 2026-08-08 while
+-- routed GET success was 8.5% (not_found 74.2%, timeout_exhausted 17.3%).
+-- Never aggregate across the two. See TelemetryDB.route_class.
 CREATE TABLE IF NOT EXISTS get_terminals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp_ns INTEGER NOT NULL,
@@ -621,13 +632,47 @@ class TelemetryDB:
             })
         return result
 
+    # `attempts` classification, shared by the SQL below and by ws_server's live
+    # path so a restart cannot reclassify history. See ROUTE_CLASS_SQL.
+    ROUTE_LOCAL = "local"      # attempts == 0: answered from the local store
+    ROUTE_NETWORK = "network"  # attempts >= 1: at least one GET was sent
+    ROUTE_UNKNOWN = "unknown"  # attempts absent: which one is unmeasured
+
+    # attempts is the core's own split (GetEvent::ClientTerminal): "`1` means the
+    # first peer answered; `0` is the convention for a LOCAL-cache hit that never
+    # routed to the network ... letting analysts split 'all client GET successes'
+    # (attempts >= 0) from 'network GET findability' (attempts >= 1)".
+    ROUTE_CLASS_SQL = (
+        "CASE WHEN attempts IS NULL THEN 'unknown' "
+        "WHEN attempts = 0 THEN 'local' ELSE 'network' END"
+    )
+
+    @staticmethod
+    def route_class(attempts):
+        """Classify one terminal's `attempts` the way ROUTE_CLASS_SQL does.
+
+        The live counter path and the post-restart rebuild MUST agree, so both
+        go through this rather than each writing its own comparison.
+        """
+        if attempts is None:
+            return TelemetryDB.ROUTE_UNKNOWN
+        return TelemetryDB.ROUTE_LOCAL if attempts == 0 else TelemetryDB.ROUTE_NETWORK
+
     def get_terminal_buckets(self, since_ns, bucket_ns, until_ns=None):
         """Aggregate client-facing GET outcomes into time buckets.
 
-        Returns rows of (bucket_ts, outcome, is_sub_op, count, mean elapsed_ms).
-        The mean is not currently consumed — get_terminal reports elapsed_ms=0
-        on ~99.5% of successful direct GETs, so latency comes from the
-        get_request -> get_success delta instead.
+        Returns rows of
+        (bucket_ts, outcome, is_sub_op, route_class, count, mean elapsed_ms).
+
+        `route_class` splits local-store hits from network-routed GETs and is
+        NOT optional detail: a local hit never leaves the machine and therefore
+        cannot fail, so blending the two produces a success rate whose
+        denominator is ~95% cases with no failure mode. Through 2026-08-08 that
+        blend read ~95% while network-routed GET success was 8.5%.
+
+        The mean elapsed_ms is not currently consumed — get_terminal reports
+        elapsed_ms=0 on ~99.5% of successful direct GETs, so latency comes from
+        the get_request -> get_success delta instead.
         Reads the small get_terminals projection rather than the events table,
         which has no event_type index and is hundreds of GB.
 
@@ -635,19 +680,18 @@ class TelemetryDB:
         (e.g. sim/CI telemetry hitting this same prod endpoint) — one such
         row is enough to stretch the metrics chart's time axis across months.
         """
+        select = (
+            f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
+            f"outcome, is_sub_op, {self.ROUTE_CLASS_SQL} AS route_class, "
+            "COUNT(*), AVG(elapsed_ms) FROM get_terminals "
+        )
+        group = " GROUP BY bucket, outcome, is_sub_op, route_class ORDER BY bucket"
         if until_ns is None:
             return self.conn.execute(
-                f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
-                "outcome, is_sub_op, COUNT(*), AVG(elapsed_ms) "
-                "FROM get_terminals WHERE timestamp_ns > ? "
-                "GROUP BY bucket, outcome, is_sub_op ORDER BY bucket",
-                (since_ns,),
+                select + "WHERE timestamp_ns > ?" + group, (since_ns,),
             ).fetchall()
         return self.conn.execute(
-            f"SELECT (timestamp_ns / {int(bucket_ns)}) * {int(bucket_ns)} AS bucket, "
-            "outcome, is_sub_op, COUNT(*), AVG(elapsed_ms) "
-            "FROM get_terminals WHERE timestamp_ns > ? AND timestamp_ns <= ? "
-            "GROUP BY bucket, outcome, is_sub_op ORDER BY bucket",
+            select + "WHERE timestamp_ns > ? AND timestamp_ns <= ?" + group,
             (since_ns, until_ns),
         ).fetchall()
 

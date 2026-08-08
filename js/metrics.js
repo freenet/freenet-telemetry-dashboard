@@ -57,6 +57,114 @@ function ema(data, alpha = 0.35) {
     return result;
 }
 
+const NUM = new Intl.NumberFormat();
+
+/**
+ * Sum the raw GET counts over the last `hours` of the series.
+ *
+ * The summary above the chart answers "is the network serving requests right
+ * now", so it aggregates recent raw counts rather than averaging the per-bucket
+ * rates — averaging rates would weight a quiet bucket the same as a busy one.
+ */
+function recentGetTotals(series, hours = 24) {
+    const cutoff = series.length
+        ? series[series.length - 1].t - hours * 3600 * 1e9
+        : 0;
+    const t = {
+        routed: 0, routedOk: 0, routedNf: 0, routedTimeout: 0,
+        local: 0, unknown: 0, subOp: 0,
+    };
+    for (const p of series) {
+        if (p.t < cutoff) continue;
+        const routedN = p.get_routed_n || 0;
+        t.routed += routedN;
+        // get_routed_rate is null in a bucket below the minimum sample count,
+        // but its raw counts are still real and belong in the total.
+        if (p.get_routed_rate != null) {
+            t.routedOk += Math.round(routedN * p.get_routed_rate / 100);
+        }
+        t.routedNf += p.get_routed_nf_n || 0;
+        t.routedTimeout += p.get_routed_timeout_n || 0;
+        t.local += p.get_local_n || 0;
+        t.unknown += p.get_unknown_n || 0;
+        t.subOp += p.get_sub_n || 0;
+    }
+    return t;
+}
+
+function pct(n, d) {
+    return d > 0 ? Math.round(n / d * 1000) / 10 : null;
+}
+
+function rateClass(rate) {
+    if (rate == null) return '';
+    if (rate >= 90) return 'good';
+    if (rate >= 60) return 'warn';
+    return 'bad';
+}
+
+/**
+ * The headline: network-routed GET success, with the failure split beside it.
+ *
+ * Routed and local-store GETs are reported apart on purpose. A local hit
+ * (attempts === 0 on the core's ClientTerminal event) never leaves the machine
+ * and so cannot fail; it was ~95% of client GETs, which held the old blended
+ * "GET success" line near 95% while routed success was 8.5%. A number that
+ * stays high whether or not the network works cannot answer the only question
+ * this panel is for.
+ */
+function renderGetSummary(series) {
+    const t = recentGetTotals(series);
+    const routedRate = pct(t.routedOk, t.routed);
+    const el = document.createElement('div');
+    el.className = 'get-health';
+
+    const nfShare = pct(t.routedNf, t.routed);
+    const toShare = pct(t.routedTimeout, t.routed);
+    const breakdown = t.routed
+        ? `not found ${nfShare}% &middot; timed out ${toShare}%`
+        : 'no routed GETs in this window';
+
+    el.innerHTML = `
+        <div class="get-health-main">
+            <div class="get-health-label">Network GET success <span class="get-health-window">last 24h</span></div>
+            <div class="get-health-rate ${rateClass(routedRate)}">${
+                routedRate == null ? '&mdash;' : routedRate + '%'
+            }</div>
+            <div class="get-health-sub">${NUM.format(t.routed)} routed &middot; ${breakdown}</div>
+        </div>
+        <div class="get-health-aside">
+            <div class="get-health-aside-row">
+                <span class="label">Local cache hits</span>
+                <span class="val">${NUM.format(t.local)}</span>
+            </div>
+            <div class="get-health-aside-row">
+                <span class="label">Sub-op GETs</span>
+                <span class="val">${NUM.format(t.subOp)}</span>
+            </div>
+            ${t.unknown ? `<div class="get-health-aside-row warnrow">
+                <span class="label">Unclassified</span>
+                <span class="val">${NUM.format(t.unknown)}</span>
+            </div>` : ''}
+        </div>`;
+    return el;
+}
+
+function getHealthFootnote() {
+    const el = document.createElement('div');
+    el.className = 'get-health-note';
+    el.innerHTML =
+        'GET success counts only <strong>routed</strong> GETs &mdash; those that actually ' +
+        'sent a request to another peer (<code>attempts &ge; 1</code>). ' +
+        'Local cache hits (<code>attempts = 0</code>) are excluded: they never reach the ' +
+        'network, always succeed, and were ~95% of client GETs, so including them ' +
+        'produced a ~95% reading while routed GETs were at 8.5%. ' +
+        'Sub-op GETs are internal repair/renewal traffic, not client requests. ' +
+        'PUT and UPDATE are per-hop counts, not client-visible outcomes &mdash; ' +
+        'treat them as volume, not success.';
+    return el;
+}
+
 export function initMetricsChart(container) {
     if (chart) {
         chart.destroy();
@@ -64,9 +172,6 @@ export function initMetricsChart(container) {
     }
 
     container.innerHTML = '';
-    chartCanvas = document.createElement('canvas');
-    chartCanvas.id = 'metrics-canvas';
-    container.appendChild(chartCanvas);
 
     const data = state.metricsTimeseries;
     if (!data || !data.series || data.series.length === 0) {
@@ -74,16 +179,29 @@ export function initMetricsChart(container) {
         return;
     }
 
+    container.appendChild(renderGetSummary(data.series));
+
+    const canvasWrap = document.createElement('div');
+    canvasWrap.className = 'metrics-canvas-wrap';
+    chartCanvas = document.createElement('canvas');
+    chartCanvas.id = 'metrics-canvas';
+    canvasWrap.appendChild(chartCanvas);
+    container.appendChild(canvasWrap);
+    container.appendChild(getHealthFootnote());
+
     const series = data.series;
     const versions = data.versions || [];
 
     const labels = series.map(p => new Date(p.t / 1_000_000));
 
     // Raw rates for tooltips.
-    // get_rate is the CLIENT-FACING direct GET success rate, measured from
-    // get_terminal. It used to be derived from the per-hop get_success /
-    // get_not_found counts, which understated it by ~600x (issue #15).
-    const rawGet = series.map(p => p.get_rate);
+    // get_routed_rate is the CLIENT-FACING success rate of GETs that actually
+    // routed, measured from get_terminal. Two defects had to be removed to get
+    // here: deriving it from the per-hop get_success / get_not_found counts
+    // understated it by ~600x (issue #15), and blending in attempts===0 local
+    // store hits — which cannot fail and were 95% of the denominator — held it
+    // near 95% while routed GETs were succeeding 8.5% of the time.
+    const rawGet = series.map(p => p.get_routed_rate);
     const rawGetSub = series.map(p => p.get_sub_rate);
     const rawPut = series.map(p => p.put_rate);
     const rawUpd = series.map(p => p.upd_rate);
@@ -104,7 +222,9 @@ export function initMetricsChart(container) {
             labels: labels,
             datasets: [
                 {
-                    label: 'GET',
+                    // Named for its population. A bare "GET" is what let a
+                    // cache-hit-dominated rate pass as network health.
+                    label: 'GET (routed)',
                     data: smoothGet,
                     borderColor: C.get,
                     backgroundColor: C.get + '18',
@@ -216,12 +336,25 @@ export function initMetricsChart(container) {
                             // Show raw (unsmoothed) value + sample count
                             const lbl = item.dataset.label;
                             let raw, count;
-                            if (lbl === 'GET') { raw = rawGet[idx]; count = s.get_n; }
+                            if (lbl === 'GET (routed)') { raw = rawGet[idx]; count = s.get_routed_n; }
                             else if (lbl === 'GET (sub-op)') { raw = rawGetSub[idx]; count = s.get_sub_n; }
                             else if (lbl === 'PUT') { raw = rawPut[idx]; count = s.put_n; }
                             else if (lbl === 'UPDATE') { raw = rawUpd[idx]; count = s.upd_n; }
                             if (raw == null) return ` ${lbl}: insufficient data`;
-                            return ` ${lbl}: ${raw}% (${count} ops)`;
+                            const line = ` ${lbl}: ${raw}% (${count} ops)`;
+                            if (lbl !== 'GET (routed)') return line;
+                            // Spell out WHY routed GETs failed and how many
+                            // GETs never routed at all, so the small routed
+                            // denominator reads as a split rather than a gap.
+                            const extra = [
+                                ` failed: ${s.get_routed_nf_n || 0} not found, ` +
+                                `${s.get_routed_timeout_n || 0} timed out`,
+                                ` ${s.get_local_n || 0} local cache hits (not routed)`,
+                            ];
+                            if (s.get_unknown_n) {
+                                extra.push(` ${s.get_unknown_n} unclassified — rate is undercounting`);
+                            }
+                            return [line, ...extra];
                         }
                     }
                 },
@@ -285,17 +418,23 @@ export function updateMetricsChart() {
     const series = data.series;
     const labels = series.map(p => new Date(p.t / 1_000_000));
 
-    const rawGet = series.map(p => p.get_rate);
+    const rawGet = series.map(p => p.get_routed_rate);
     const rawGetSub = series.map(p => p.get_sub_rate);
     const rawPut = series.map(p => p.put_rate);
     const rawUpd = series.map(p => p.upd_rate);
+
+    // The summary above the chart is a 24h aggregate, so it has to be rebuilt
+    // on refresh too — a stale headline is the failure mode this panel is
+    // supposed to have stopped having.
+    const summary = document.querySelector('.get-health');
+    if (summary) summary.replaceWith(renderGetSummary(series));
 
     chart.data.labels = labels;
     // Match datasets by label rather than position: this list has been indexed
     // positionally before, so inserting a series silently fed one line another
     // line's data.
     const byLabel = {
-        'GET': rawGet,
+        'GET (routed)': rawGet,
         'GET (sub-op)': rawGetSub,
         'PUT': rawPut,
         'UPDATE': rawUpd,
