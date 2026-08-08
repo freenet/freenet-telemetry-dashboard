@@ -356,12 +356,14 @@ export function initMetricsChart(container) {
                             // never a percentage — returning early keeps them out
                             // of the "%" formatting below entirely.
                             if (lbl === 'PUT hops') {
-                                return ` PUT: ${NUM.format(s.put_hops_n || 0)} hop events `
-                                     + `(${NUM.format(s.put_hops_ok || 0)} succeeded per-hop; not a client rate)`;
+                                return ` PUT: ${NUM.format(s.put_hops_n || 0)} put_request, `
+                                     + `${NUM.format(s.put_hops_ok || 0)} put_success — separate per-hop`
+                                     + ` counters, not a numerator over a denominator`;
                             }
                             if (lbl === 'UPDATE hops') {
-                                return ` UPDATE: ${NUM.format(s.upd_hops_n || 0)} hop events `
-                                     + `(${NUM.format(s.upd_hops_ok || 0)} succeeded per-hop; not a client rate)`;
+                                return ` UPDATE: ${NUM.format(s.upd_hops_n || 0)} update_request, `
+                                     + `${NUM.format(s.upd_hops_ok || 0)} update_success — separate per-hop`
+                                     + ` counters, not a numerator over a denominator`;
                             }
                             if (lbl === 'GET (routed)') { raw = rawGet[idx]; count = s.get_routed_n; }
                             else if (lbl === 'GET (sub-op)') { raw = rawGetSub[idx]; count = s.get_sub_n; }
