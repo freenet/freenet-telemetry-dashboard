@@ -50,8 +50,9 @@ def test_every_series_key_the_chart_reads_is_emitted(srv):
 
 
 @pytest.mark.parametrize("key", [
-    "get_routed_rate", "get_sub_rate", "put_rate", "upd_rate",
-    "get_routed_n", "get_sub_n", "put_n", "upd_n",
+    "get_routed_rate", "get_sub_rate",
+    "get_routed_n", "get_sub_n",
+    "put_hops_n", "put_hops_ok", "upd_hops_n", "upd_hops_ok",
     # The headline sums these directly; get_routed_ok_n in particular must be
     # published, because reconstructing it from get_routed_rate loses every
     # bucket below METRICS_MIN_SAMPLES.

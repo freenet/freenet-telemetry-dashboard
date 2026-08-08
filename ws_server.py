@@ -803,19 +803,40 @@ def get_metrics_timeseries():
 
         series.append({
             "t": b["ts"],
-            "put_rate": rate_or_none(b["put_ok"], put_total),
+            # No put_rate / upd_rate. put_request/put_success and
+            # update_request/update_success are minted per HOP on the response
+            # path, so their ratio weights by route length rather than
+            # measuring what a client saw — the same defect as issue #15, and
+            # the same reason SUBSCRIBE has never had a rate.
+            #
+            # Their ratios were not merely imprecise, they were inverted:
+            # UPDATE read 0.0-0.1% (update_request fires ~1,553 times per
+            # transaction, one produced 10,741) while updates propagated fine,
+            # and PUT computed 148.6% / 147.5% / 134.2% in 6 of 8 buckets
+            # because put_success fires at more points per tx than put_request.
+            # The y-axis is capped at 100, so PUT drew PINNED FLAT AT THE TOP —
+            # a broken measurement rendering as perfect health.
+            #
+            # There is no arithmetic that fixes this; it needs a client-facing
+            # terminal event the core does not emit (freenet-core#5250). Until
+            # then these ship as volume only.
             # Deliberately NOT named get_rate. The old key meant "direct GETs,
             # routed or not"; a consumer still reading it should break loudly
             # rather than silently keep plotting a differently-scoped number.
             "get_routed_rate": rate_or_none(pop("direct_network", "success"), net_total),
             "get_sub_rate": rate_or_none(sub_ok, get_sub_total),
-            "upd_rate": rate_or_none(b["upd_ok"], upd_total),
             # No sub_rate. SUBSCRIBE has no client-facing terminal event, so
             # subscribe_success/_not_found are minted per hop on the response
             # path and their ratio weights by hop count — the same defect that
             # made GET read 0.05% against a real 87% (issue #15). There is no
             # arithmetic that fixes it, so the counts ship without a rate.
-            "put_n": put_total,
+            # PUT/UPDATE volume, named so it cannot be read as an outcome:
+            # these are per-HOP event counts, so they track how much work the
+            # network did, not how much of it succeeded.
+            "put_hops_n": put_total,
+            "put_hops_ok": b["put_ok"],
+            "upd_hops_n": upd_total,
+            "upd_hops_ok": b["upd_ok"],
             "get_routed_n": net_total,
             # EXACT routed success count, not derivable from the rate above.
             # The 24h headline sums raw counts across buckets, and a bucket
@@ -826,7 +847,6 @@ def get_metrics_timeseries():
             # the numerator so no consumer has to invert a rounded rate.
             "get_routed_ok_n": pop("direct_network", "success"),
             "get_sub_n": get_sub_total,
-            "upd_n": upd_total,
             # Why routed GETs failed. not_found and timeout_exhausted imply
             # different problems (findability/placement vs routing/transport),
             # so a single failure rate would average away which one is biting.
