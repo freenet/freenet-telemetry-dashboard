@@ -21,11 +21,19 @@ def js_source():
 
 
 def series_keys_read_by_client():
-    """Keys pulled off a series point: `series.map(p => p.foo)` and, inside the
-    tooltip, `s.foo` where `const s = series[idx]`."""
+    """Every key the chart pulls off a series point.
+
+    Matches any `p.foo` / `s.foo` access, because those are the two names the
+    client binds a series point to (`series.map(p => ...)`, and `const s =
+    series[idx]` in the tooltip). An earlier version matched only the two
+    specific SHAPES `p => p.foo` and `count = s.foo`, which silently missed
+    every key read any other way — `get_local_n`, `get_unknown_n`,
+    `get_routed_nf_n` and `get_routed_timeout_n` were all invisible to it, so
+    the guard against exactly this drift was vacuous for the fields that needed
+    it most. Deleting the JS that reads `get_local_n` left the suite green.
+    """
     src = js_source()
-    keys = set(re.findall(r"p\s*=>\s*p\.([a-z_]+)", src))
-    keys |= set(re.findall(r"\bcount\s*=\s*s\.([a-z_]+)", src))
+    keys = set(re.findall(r"\b[ps]\.([a-z_]{3,})\b", src))
     assert keys, "the extraction regex matched nothing — it has drifted"
     return keys
 
@@ -44,6 +52,11 @@ def test_every_series_key_the_chart_reads_is_emitted(srv):
 @pytest.mark.parametrize("key", [
     "get_routed_rate", "get_sub_rate", "put_rate", "upd_rate",
     "get_routed_n", "get_sub_n", "put_n", "upd_n",
+    # The headline sums these directly; get_routed_ok_n in particular must be
+    # published, because reconstructing it from get_routed_rate loses every
+    # bucket below METRICS_MIN_SAMPLES.
+    "get_routed_ok_n", "get_routed_nf_n", "get_routed_timeout_n",
+    "get_local_n", "get_local_ok", "get_unknown_n",
 ])
 def test_chart_keys_are_present(srv, key):
     t = time.time_ns()

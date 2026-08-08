@@ -817,6 +817,14 @@ def get_metrics_timeseries():
             # arithmetic that fixes it, so the counts ship without a rate.
             "put_n": put_total,
             "get_routed_n": net_total,
+            # EXACT routed success count, not derivable from the rate above.
+            # The 24h headline sums raw counts across buckets, and a bucket
+            # below METRICS_MIN_SAMPLES publishes get_routed_rate=None while its
+            # volume is still real. Reconstructing successes as n * rate/100
+            # therefore dropped those buckets' successes while keeping their n,
+            # understating the headline (a true 100% reported as 87%). Publish
+            # the numerator so no consumer has to invert a rounded rate.
+            "get_routed_ok_n": pop("direct_network", "success"),
             "get_sub_n": get_sub_total,
             "upd_n": upd_total,
             # Why routed GETs failed. not_found and timeout_exhausted imply

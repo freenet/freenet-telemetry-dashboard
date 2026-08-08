@@ -76,13 +76,13 @@ function recentGetTotals(series, hours = 24) {
     };
     for (const p of series) {
         if (p.t < cutoff) continue;
-        const routedN = p.get_routed_n || 0;
-        t.routed += routedN;
-        // get_routed_rate is null in a bucket below the minimum sample count,
-        // but its raw counts are still real and belong in the total.
-        if (p.get_routed_rate != null) {
-            t.routedOk += Math.round(routedN * p.get_routed_rate / 100);
-        }
+        t.routed += p.get_routed_n || 0;
+        // Sum the server's exact success count. Do NOT reconstruct it from
+        // get_routed_rate: that is null in any bucket below the minimum sample
+        // count, so the successes vanished while the volume stayed, understating
+        // the headline (a true 100% reported as 87%) — worst exactly during the
+        // low-traffic periods this metric exists to catch.
+        t.routedOk += p.get_routed_ok_n || 0;
         t.routedNf += p.get_routed_nf_n || 0;
         t.routedTimeout += p.get_routed_timeout_n || 0;
         t.local += p.get_local_n || 0;

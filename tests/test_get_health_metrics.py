@@ -354,6 +354,58 @@ class TestLocalHitsDoNotDiluteTheRoutedRate:
         assert live["get_local_n"] == 300
 
 
+class TestTheHeadlineSumsCountsNotRates:
+    """The 24h headline aggregates buckets, and a sparse bucket publishes
+    `get_routed_rate: None` (below METRICS_MIN_SAMPLES) while its volume is
+    still real. Reconstructing successes as `n * rate/100` dropped those
+    successes and kept their n, understating the headline — a true 100% read
+    as 87%, worst during exactly the quiet periods this metric should catch.
+    The server therefore publishes the exact numerator.
+    """
+
+    def test_the_exact_routed_success_count_is_published(self, srv):
+        t = time.time_ns()
+        for i in range(3):
+            feed(srv, "get_terminal", t + i, tx_id=f"ok-{i}",
+                 outcome="success", attempts=2)
+        feed(srv, "get_terminal", t + 100, tx_id="nf", outcome="not_found",
+             attempts=2)
+        point = series_of(srv)
+        assert point["get_routed_ok_n"] == 3
+        assert point["get_routed_n"] == 4
+
+    def test_a_sparse_bucket_publishes_counts_even_with_no_rate(self, srv):
+        """Two routed GETs is under METRICS_MIN_SAMPLES, so no rate — but the
+        counts must survive, or the headline loses them."""
+        t = time.time_ns()
+        for i in range(2):
+            feed(srv, "get_terminal", t + i, tx_id=f"ok-{i}",
+                 outcome="success", attempts=2)
+        point = series_of(srv)
+        assert point["get_routed_rate"] is None, "too few samples for a rate"
+        assert point["get_routed_ok_n"] == 2, "successes vanished with the rate"
+        assert point["get_routed_n"] == 2
+
+    def test_the_client_does_not_invert_the_rate_to_get_successes(self):
+        """js/metrics.js must sum get_routed_ok_n, not n * rate / 100."""
+        import os
+        js = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "js", "metrics.js")
+        with open(js, encoding="utf-8") as f:
+            src = f.read()
+        head, _, body = src.partition("function recentGetTotals")
+        assert body, "recentGetTotals moved; this pin no longer bounds anything"
+        body = body[:body.index("\n}")]
+        assert "p.get_routed_ok_n" in body
+        # Match the property ACCESS, not the bare word: the body explains in a
+        # comment why the rate must not be used, and a needle that its own
+        # explanation satisfies would fire on the fixed code.
+        assert "p.get_routed_rate" not in body, (
+            "the headline is reconstructing successes from a rounded, "
+            "sometimes-null rate again"
+        )
+
+
 class TestTheSplitterChoiceIsRecordedAndDefensible:
     """freenet-core #4852 P2 switched its OWN split from `attempts` to
     `hop_count`, because a loopback LocalCompletion bumps `requests_sent`
@@ -382,20 +434,28 @@ class TestTheSplitterChoiceIsRecordedAndDefensible:
                 f"({needle!r}) is no longer recorded beside the classifier"
             )
 
-    def test_a_zero_millisecond_success_at_attempts_one_would_be_a_loopback(self, srv):
-        """The shape that would invalidate the choice, asserted as a live check.
+    def test_classification_follows_attempts_and_ignores_latency(self, srv):
+        """Latency is the EVIDENCE for the choice, never the rule applied.
 
-        This does not fail today — it documents what to look for. If real
-        traffic ever produces attempts>=1 successes at ~0 ms, they are loopback
-        completions and the routed rate is being inflated by them.
+        A reader of the rationale might reasonably think elapsed_ms is part of
+        the classifier. It is not, deliberately: latency is what we measured to
+        show the populations are clean, and baking a threshold into the code
+        would invent a second, unvalidated rule. So a 0 ms attempts=1 terminal
+        counts as ROUTED (this is the loopback shape core's #4852 warns about —
+        if production ever produces it, revisit the classifier) and a slow
+        attempts=0 terminal counts as LOCAL.
         """
         t = time.time_ns()
-        for i in range(10):
-            feed(srv, "get_terminal", t + i, tx_id=f"g-{i}",
+        for i in range(6):
+            feed(srv, "get_terminal", t + i, tx_id=f"fast-{i}",
                  outcome="success", attempts=1, elapsed_ms=0)
-        # Counted as routed, because attempts says so. If production ever looks
-        # like this fixture, revisit the classifier — see telemetry_db.
-        assert series_of(srv)["get_routed_n"] == 10
+        for i in range(5):
+            feed(srv, "get_terminal", t + 100 + i, tx_id=f"slow-{i}",
+                 outcome="success", attempts=0, elapsed_ms=9000)
+
+        point = series_of(srv)
+        assert point["get_routed_n"] == 6, "0 ms did not make it local"
+        assert point["get_local_n"] == 5, "9 s did not make it routed"
 
 
 class TestOperationStatsSplitsLocalFromRouted:
@@ -414,6 +474,22 @@ class TestOperationStatsSplitsLocalFromRouted:
         assert stats["routed_success_rate"] == 11.1
         assert stats["local_hit_total"] == 200
         assert stats["local_hit_success"] == 200
+
+    def test_unclassified_terminals_do_not_leak_into_the_routed_rate(self, srv):
+        """Mutating _DIRECT_STAT_BUCKET to file unknown-attempts terminals as
+        routed left the whole suite green, so the stats path had no guard."""
+        t = time.time_ns()
+        for i in range(9):
+            feed(srv, "get_terminal", t + i, tx_id=f"u-{i}",
+                 outcome="success", attempts=None)
+        feed(srv, "get_terminal", t + 100, tx_id="nf", outcome="not_found",
+             attempts=2)
+
+        stats = srv.get_operation_stats()["get"]
+        assert stats["unclassified_total"] == 9
+        assert stats["routed_total"] == 1, "unclassified leaked into routed"
+        assert stats["routed_success_rate"] == 0.0
+        assert stats["local_hit_total"] == 0
 
     def test_timeouts_are_counted_separately_from_not_found(self, srv):
         t = time.time_ns()
