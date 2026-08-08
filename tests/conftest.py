@@ -28,8 +28,14 @@ def srv(tmp_path):
     ws_server.op_stats["put"].update(requests=0, successes=0, latencies=[])
     ws_server.op_stats["get"].update(
         hop_requests=0, hop_not_found=0,
-        term_direct={"success": 0, "not_found": 0, "other": 0},
-        term_sub_op={"success": 0, "not_found": 0, "other": 0},
+        term_direct_net={"success": 0, "not_found": 0,
+                         "timeout_exhausted": 0, "other": 0},
+        term_direct_loc={"success": 0, "not_found": 0,
+                         "timeout_exhausted": 0, "other": 0},
+        term_direct_unk={"success": 0, "not_found": 0,
+                         "timeout_exhausted": 0, "other": 0},
+        term_sub_op={"success": 0, "not_found": 0,
+                     "timeout_exhausted": 0, "other": 0},
         latencies=[],
     )
     ws_server.op_stats["update"].update(requests=0, successes=0, broadcasts=0, latencies=[])
