@@ -6,3 +6,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Secret salt for peer-ID hashing (ws_server.py: PEER_ID_SALT_FILE) — must
+# never be committed, or the "anonymized" peer IDs become reversible.
+peer_id_salt.secret

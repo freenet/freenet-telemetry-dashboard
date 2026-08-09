@@ -10,7 +10,6 @@ real-time and resumes from stored offset on restart.
 Usage: ./venv/bin/python3 backfill_db.py
 """
 
-import hashlib
 import re
 import sqlite3
 import sys
@@ -61,12 +60,11 @@ outcome_wins = ws_server.outcome_wins
 PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)')
 
 
-def anonymize_ip(ip):
-    return "peer-" + hashlib.sha256(ip.encode()).hexdigest()[:8]
-
-
-def ip_hash(ip):
-    return hashlib.sha256(ip.encode()).hexdigest()[:6]
+# Reused rather than duplicated so a backfill rebuild produces the SAME
+# peer-IDs as live ws_server output — a local copy would drift the moment
+# ws_server's salted hashing changed (see PEER_ID_SALT in ws_server.py).
+anonymize_ip = ws_server.anonymize_ip
+ip_hash = ws_server.ip_hash
 
 
 def is_public_ip(ip):

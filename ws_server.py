@@ -40,6 +40,40 @@ WS_PORT = int(os.environ.get("FREENET_DASHBOARD_WS_PORT", "3134"))
 PEER_NAMES_FILE = Path(os.environ.get(
     "FREENET_PEER_NAMES_FILE", "/var/www/freenet-dashboard/peer_names.json"))
 
+# Secret salt mixed into anonymize_ip()/ip_hash() below. Without it, sha256(ip)
+# is invertible over the whole IPv4 space (~4.3B entries, seconds to precompute
+# on a laptop), so "peer-XXXXXXXX" would not actually hide a peer's IP from
+# anyone who bothered to build the lookup table — and the hashing code itself
+# is public (this repo). The salt lives in a git-ignored local file, generated
+# once on first run, and must stay stable across restarts so a given IP keeps
+# the same peer-ID.
+PEER_ID_SALT_FILE = Path(os.environ.get(
+    "FREENET_DASHBOARD_SALT_FILE", "/var/www/freenet-dashboard/peer_id_salt.secret"))
+
+
+def _load_or_create_salt() -> str:
+    env_salt = os.environ.get("FREENET_DASHBOARD_PEER_SALT")
+    if env_salt:
+        return env_salt
+    if PEER_ID_SALT_FILE.exists():
+        return PEER_ID_SALT_FILE.read_text().strip()
+    salt = secrets.token_hex(32)
+    try:
+        # O_EXCL makes creation atomic (no TOCTOU chmod window) and lets a
+        # concurrent first-run loser detect the race via FileExistsError
+        # instead of silently writing a second, different salt.
+        fd = os.open(PEER_ID_SALT_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, salt.encode())
+        finally:
+            os.close(fd)
+        return salt
+    except FileExistsError:
+        return PEER_ID_SALT_FILE.read_text().strip()
+
+
+PEER_ID_SALT = _load_or_create_salt()
+
 # Connection limits - reserve slots for returning users and peers
 MAX_CLIENTS = 300           # Total max connections
 PRIORITY_RESERVED = 50      # Slots reserved for priority users (returning visitors + peers)
@@ -1027,7 +1061,7 @@ def anonymize_ip(ip: str) -> str:
     """Convert IP to anonymous identifier."""
     if not ip:
         return "unknown"
-    h = hashlib.sha256(ip.encode()).hexdigest()[:8]
+    h = hashlib.sha256((PEER_ID_SALT + ip).encode()).hexdigest()[:8]
     return f"peer-{h}"
 
 
@@ -1035,7 +1069,7 @@ def ip_hash(ip: str) -> str:
     """Generate a short hash of IP for user self-identification."""
     if not ip:
         return ""
-    return hashlib.sha256(ip.encode()).hexdigest()[:6]
+    return hashlib.sha256((PEER_ID_SALT + ip).encode()).hexdigest()[:6]
 
 
 # Local development only: without this the filter below hides every node a
