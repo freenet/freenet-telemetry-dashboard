@@ -155,7 +155,10 @@ def main():
 
     start_time = time.time()
 
-    with open(TELEMETRY_LOG, "r") as f:
+    # errors='replace': torn collector writes splice raw binary mid-line, and
+    # iteration decodes outside the try/except below — strict mode aborts the
+    # whole backfill on one corrupt byte. See ws_server.py's tailer.
+    with open(TELEMETRY_LOG, "r", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue

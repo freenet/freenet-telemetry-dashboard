@@ -3036,8 +3036,14 @@ async def tail_log():
         current_inode = os.stat(TELEMETRY_LOG).st_ino
         print(f"Tailing {TELEMETRY_LOG} (inode {current_inode})")
 
-        # Start at end of file
-        with open(TELEMETRY_LOG, 'r') as f:
+        # Start at end of file.
+        # errors='replace': the collector occasionally emits a torn write with
+        # raw binary spliced mid-line. Decoding is done by readline(), OUTSIDE
+        # the try/except that guards orjson below, so a strict decode turns one
+        # corrupt byte into a crash-loop that stays down until log rotation
+        # carries the line away (5 outages, Aug 2-16 2026). Replacing the bytes
+        # lets the line fail JSON parsing and be skipped like any other garbage.
+        with open(TELEMETRY_LOG, 'r', errors='replace') as f:
             f.seek(0, 2)  # Seek to end
 
             while True:
@@ -3322,7 +3328,9 @@ async def load_initial_state():
     memory_cutoff = now_ns - MAX_HISTORY_AGE_NS
     has_db = resume_offset > 0
 
-    with open(TELEMETRY_LOG, 'r') as f:
+    # errors='replace' — see the tailer's open() for why a strict decode here
+    # is a crash-loop rather than a skipped line.
+    with open(TELEMETRY_LOG, 'r', errors='replace') as f:
         if resume_offset > 0:
             f.seek(resume_offset)
             f.readline()  # skip partial line
