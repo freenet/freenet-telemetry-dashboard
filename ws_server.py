@@ -10,6 +10,8 @@ Supports time-travel by buffering event history.
 import asyncio
 import hashlib
 import re
+import sys
+import threading
 import time
 import os
 import secrets
@@ -51,14 +53,27 @@ PEER_ID_SALT_FILE = Path(os.environ.get(
     "FREENET_DASHBOARD_SALT_FILE", "/var/www/freenet-dashboard/peer_id_salt.secret"))
 
 
-def _load_or_create_salt() -> str:
-    env_salt = os.environ.get("FREENET_DASHBOARD_PEER_SALT")
-    if env_salt:
-        return env_salt
-    if PEER_ID_SALT_FILE.exists():
-        return PEER_ID_SALT_FILE.read_text().strip()
+def _read_salt_file() -> str | None:
+    """The persisted salt, or None if it is absent, unreadable or unusable."""
+    try:
+        salt = PEER_ID_SALT_FILE.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    # An empty file is what a first run that died between the O_EXCL create and
+    # the write leaves behind, and it is also what the loser of that race reads
+    # if it looks too early. Accepting it would hash every IP with an empty
+    # salt — precisely the reversible scheme the salt exists to prevent — so
+    # treat it as "no salt persisted" and fall through to the loud path below.
+    return salt or None
+
+
+def _generate_salt() -> str:
+    """Generate a salt and persist it, falling back to an ephemeral one."""
     salt = secrets.token_hex(32)
     try:
+        # The deploy directory normally already exists; creating it keeps a
+        # fresh host (and any run pointed at a scratch path) working.
+        PEER_ID_SALT_FILE.parent.mkdir(parents=True, exist_ok=True)
         # O_EXCL makes creation atomic (no TOCTOU chmod window) and lets a
         # concurrent first-run loser detect the race via FileExistsError
         # instead of silently writing a second, different salt.
@@ -69,10 +84,53 @@ def _load_or_create_salt() -> str:
             os.close(fd)
         return salt
     except FileExistsError:
-        return PEER_ID_SALT_FILE.read_text().strip()
+        persisted = _read_salt_file()
+        if persisted:
+            return persisted
+        reason = f"{PEER_ID_SALT_FILE} exists but is empty or unreadable"
+    except OSError as e:
+        # Missing parent directory, read-only filesystem, no permission: all
+        # mean the salt cannot be persisted, none of them mean we may fall back
+        # to a predictable value.
+        reason = f"cannot write {PEER_ID_SALT_FILE}: {e}"
+
+    print(
+        f"WARNING: peer-ID salt is EPHEMERAL for this process ({reason}). "
+        "Peer IDs are still unguessable, but they will NOT be stable across "
+        "restarts. Set FREENET_DASHBOARD_PEER_SALT, or point "
+        "FREENET_DASHBOARD_SALT_FILE at a writable path, to persist it.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return salt
 
 
-PEER_ID_SALT = _load_or_create_salt()
+_peer_id_salt = None
+# Resolution can be reached from a worker thread (asyncio.to_thread), so guard
+# it: two threads generating concurrently would give one of them a salt that is
+# then discarded, silently changing peer IDs mid-run.
+_peer_id_salt_lock = threading.Lock()
+
+
+def peer_id_salt() -> str:
+    """The peer-ID hashing salt, resolved once on first use.
+
+    Deliberately lazy. Resolving at import time generated a secret and touched
+    the filesystem as a side effect of `import ws_server`, so any host without
+    the deploy directory — every CI runner — could not import the module at
+    all, which took the whole test suite down from 2026-08-09.
+    """
+    global _peer_id_salt
+    if _peer_id_salt is None:
+        with _peer_id_salt_lock:
+            if _peer_id_salt is None:
+                _peer_id_salt = (
+                    os.environ.get("FREENET_DASHBOARD_PEER_SALT")
+                    or _read_salt_file()
+                    or _generate_salt()
+                )
+    return _peer_id_salt
+
 
 # Connection limits - reserve slots for returning users and peers
 MAX_CLIENTS = 300           # Total max connections
@@ -1061,7 +1119,7 @@ def anonymize_ip(ip: str) -> str:
     """Convert IP to anonymous identifier."""
     if not ip:
         return "unknown"
-    h = hashlib.sha256((PEER_ID_SALT + ip).encode()).hexdigest()[:8]
+    h = hashlib.sha256((peer_id_salt() + ip).encode()).hexdigest()[:8]
     return f"peer-{h}"
 
 
@@ -1069,7 +1127,7 @@ def ip_hash(ip: str) -> str:
     """Generate a short hash of IP for user self-identification."""
     if not ip:
         return ""
-    return hashlib.sha256((PEER_ID_SALT + ip).encode()).hexdigest()[:6]
+    return hashlib.sha256((peer_id_salt() + ip).encode()).hexdigest()[:6]
 
 
 # Local development only: without this the filter below hides every node a
