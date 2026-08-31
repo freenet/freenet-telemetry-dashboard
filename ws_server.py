@@ -53,18 +53,69 @@ PEER_ID_SALT_FILE = Path(os.environ.get(
     "FREENET_DASHBOARD_SALT_FILE", "/var/www/freenet-dashboard/peer_id_salt.secret"))
 
 
-def _read_salt_file() -> str | None:
-    """The persisted salt, or None if it is absent, unreadable or unusable."""
+# A dashboard visitor is shown their own ip_hash and knows their own IP, so a
+# (plaintext, hash) pair costs an attacker nothing to obtain. That makes the
+# salt itself the thing under attack rather than any individual IP: recovering
+# a short salt by brute force inverts every other peer's ID at once. Generated
+# salts are 64 hex characters (256 bits); this is the floor below which a
+# supplied one is refused.
+MIN_PEER_ID_SALT_LEN = 32
+
+
+def _read_salt_file() -> tuple[str | None, bool]:
+    """Return (usable salt or None, whether the file may be overwritten).
+
+    The second element is the load-bearing one. It is True only when the file's
+    contents were actually read and found unusable, which is the only case in
+    which rewriting it is safe: a file that merely could not be read may hold a
+    perfectly good salt, and clobbering it would silently re-randomize every
+    peer ID on the dashboard.
+    """
     try:
-        salt = PEER_ID_SALT_FILE.read_text().strip()
-    except (OSError, UnicodeDecodeError):
-        return None
-    # An empty file is what a first run that died between the O_EXCL create and
-    # the write leaves behind, and it is also what the loser of that race reads
-    # if it looks too early. Accepting it would hash every IP with an empty
-    # salt — precisely the reversible scheme the salt exists to prevent — so
-    # treat it as "no salt persisted" and fall through to the loud path below.
-    return salt or None
+        raw = PEER_ID_SALT_FILE.read_bytes()
+    except FileNotFoundError:
+        return None, True
+    except OSError:
+        # Exists but unreadable (permissions, IO error). Never overwrite.
+        return None, False
+    try:
+        salt = raw.decode().strip()
+    except UnicodeDecodeError:
+        return None, True
+    # A short or empty file is what a first run that died between the O_EXCL
+    # create and the write leaves behind. Accepting an empty one would hash
+    # every IP with an empty salt — precisely the reversible scheme the salt
+    # exists to prevent — and it would do so silently.
+    if len(salt) < MIN_PEER_ID_SALT_LEN:
+        return None, True
+    return salt, False
+
+
+def _replace_salt_file(salt: str) -> bool:
+    """Atomically replace an unusable salt file. True if the salt is persisted.
+
+    O_EXCL cannot repair a file that already exists, so without this a run that
+    died mid-write would leave the deployment ephemeral forever: peer IDs
+    re-randomizing on every restart, announced only by one stderr line.
+    """
+    tmp = PEER_ID_SALT_FILE.with_name(
+        f"{PEER_ID_SALT_FILE.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, salt.encode())
+        finally:
+            os.close(fd)
+        # Same directory, so this is an atomic rename: a concurrent reader sees
+        # either the old file or the complete new one, never a partial write.
+        os.replace(tmp, PEER_ID_SALT_FILE)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def _generate_salt() -> str:
@@ -84,10 +135,12 @@ def _generate_salt() -> str:
             os.close(fd)
         return salt
     except FileExistsError:
-        persisted = _read_salt_file()
+        persisted, may_overwrite = _read_salt_file()
         if persisted:
             return persisted
-        reason = f"{PEER_ID_SALT_FILE} exists but is empty or unreadable"
+        if may_overwrite and _replace_salt_file(salt):
+            return salt
+        reason = f"{PEER_ID_SALT_FILE} holds no usable salt and cannot be replaced"
     except OSError as e:
         # Missing parent directory, read-only filesystem, no permission: all
         # mean the salt cannot be persisted, none of them mean we may fall back
@@ -105,6 +158,23 @@ def _generate_salt() -> str:
     return salt
 
 
+def _resolve_salt() -> str:
+    env_salt = (os.environ.get("FREENET_DASHBOARD_PEER_SALT") or "").strip()
+    if env_salt:
+        if len(env_salt) >= MIN_PEER_ID_SALT_LEN:
+            return env_salt
+        print(
+            f"WARNING: ignoring FREENET_DASHBOARD_PEER_SALT: {len(env_salt)} "
+            f"characters is under the {MIN_PEER_ID_SALT_LEN}-character minimum, "
+            "and a salt short enough to brute-force inverts every peer ID at "
+            "once. Falling back to the salt file.",
+            file=sys.stderr,
+            flush=True,
+        )
+    persisted, _ = _read_salt_file()
+    return persisted or _generate_salt()
+
+
 _peer_id_salt = None
 # Resolution can be reached from a worker thread (asyncio.to_thread), so guard
 # it: two threads generating concurrently would give one of them a salt that is
@@ -113,22 +183,24 @@ _peer_id_salt_lock = threading.Lock()
 
 
 def peer_id_salt() -> str:
-    """The peer-ID hashing salt, resolved once on first use.
+    """The peer-ID hashing salt, resolved once on first use, then memoized.
 
     Deliberately lazy. Resolving at import time generated a secret and touched
     the filesystem as a side effect of `import ws_server`, so any host without
     the deploy directory — every CI runner — could not import the module at
-    all, which took the whole test suite down from 2026-08-09.
+    all, which took the whole test suite down from 2026-08-09. Nothing at
+    module level may call this, directly or through anonymize_ip()/ip_hash(),
+    or the laziness is undone; test_import_resolves_no_salt pins that.
+
+    The memoization is not an optimization. Re-resolving per call would, on the
+    ephemeral path, hand every call a fresh random salt, so one IP would get a
+    different peer ID in every event and the dashboard would show noise.
     """
     global _peer_id_salt
     if _peer_id_salt is None:
         with _peer_id_salt_lock:
             if _peer_id_salt is None:
-                _peer_id_salt = (
-                    os.environ.get("FREENET_DASHBOARD_PEER_SALT")
-                    or _read_salt_file()
-                    or _generate_salt()
-                )
+                _peer_id_salt = _resolve_salt()
     return _peer_id_salt
 
 
@@ -3145,8 +3217,9 @@ async def tail_log():
 
 
 GATEWAY_IP = "5.9.111.215"
-GATEWAY_PEER_ID = anonymize_ip(GATEWAY_IP)
-GATEWAY_IP_HASH = ip_hash(GATEWAY_IP)
+# Derived at use, not here: a module-level anonymize_ip() call resolves the
+# salt during import, which is exactly the side effect peer_id_salt() exists to
+# avoid. Two sha256 calls per client connection is not worth a constant.
 
 # Store client IPs and priority status from request headers (keyed by connection id)
 client_real_ips = {}
@@ -3222,8 +3295,8 @@ async def handle_client(websocket):
         state = get_network_state()
         state["your_ip_hash"] = client_ip_hash
         state["your_peer_id"] = client_peer_id
-        state["gateway_peer_id"] = GATEWAY_PEER_ID
-        state["gateway_ip_hash"] = GATEWAY_IP_HASH
+        state["gateway_peer_id"] = anonymize_ip(GATEWAY_IP)
+        state["gateway_ip_hash"] = ip_hash(GATEWAY_IP)
         # Check if client IP matches a peer in the network
         is_peer = client_ip in peers if client_ip else False
         state["you_are_peer"] = is_peer
