@@ -62,7 +62,7 @@ PEER_PATTERN = re.compile(r'(\w+)@(\d+\.\d+\.\d+\.\d+):(\d+)\s*\(@\s*([\d.]+)\)'
 
 # Reused rather than duplicated so a backfill rebuild produces the SAME
 # peer-IDs as live ws_server output — a local copy would drift the moment
-# ws_server's salted hashing changed (see PEER_ID_SALT in ws_server.py).
+# ws_server's salted hashing changed (see peer_id_salt() in ws_server.py).
 anonymize_ip = ws_server.anonymize_ip
 ip_hash = ws_server.ip_hash
 
