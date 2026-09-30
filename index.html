@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=20260726k">
+    <link rel="stylesheet" href="css/styles.css?v=20260930a">
     <script>
         // Apply saved theme before render to avoid flash of wrong theme.
         // Wrapped in try/catch because localStorage throws in Safari private browsing.
@@ -154,6 +154,7 @@
                             <button class="panel-tab active" id="tab-contracts" onclick="switchRightTab('contracts')">Contracts <span class="tab-count" id="contract-tab-count">0</span></button>
                             <button class="panel-tab" id="tab-performance" onclick="switchRightTab('performance')">Performance</button>
                             <button class="panel-tab" id="tab-versions" onclick="switchRightTab('versions')">Versions</button>
+                            <button class="panel-tab" id="tab-os" onclick="switchRightTab('os')" title="Operating systems">OS</button>
                             <button class="panel-tab" id="tab-resources" onclick="switchRightTab('resources')">Resources</button>
                             <button class="panel-tab" id="tab-checks" onclick="switchRightTab('checks')">Checks</button>
                         </div>
@@ -188,6 +189,14 @@
                             <div class="empty-state">
                                 <div class="empty-state-icon">&#128230;</div>
                                 <div>Loading version data...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="os-panel-content" class="performance-panel" style="display: none;">
+                        <div class="os-container" id="os-container">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">&#128187;</div>
+                                <div>Loading operating systems...</div>
                             </div>
                         </div>
                     </div>
@@ -272,6 +281,6 @@
     </div>
 
 
-    <script type="module" src="js/app.js?v=20260726a"></script>
+    <script type="module" src="js/app.js?v=20260930a"></script>
 </body>
 </html>

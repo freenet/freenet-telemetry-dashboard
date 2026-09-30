@@ -226,6 +226,7 @@ function handleMessage(data, callbacks) {
             console.log('Peer lifecycle:', state.peerLifecycle.active_count, 'active,',
                 state.peerLifecycle.gateway_count, 'gateways');
             updatePeerLifecycleStats();
+            if (callbacks.onLifecycleData) callbacks.onLifecycleData();
         }
 
         // Trigger initial view update
