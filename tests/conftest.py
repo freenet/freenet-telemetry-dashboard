@@ -26,6 +26,7 @@ def srv(tmp_path):
     ws_server.peers.clear()
     ws_server.peer_lifecycle.clear()
     ws_server._lifecycle_confirmed_ns.clear()
+    ws_server._lifecycle_awaiting_return.clear()
     ws_server.attrs_peer_id_to_ip.clear()
 
     ws_server.op_stats["put"].update(requests=0, successes=0, latencies=[])
