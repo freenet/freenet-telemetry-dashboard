@@ -1158,6 +1158,48 @@ def _load_version_history():
 # peer_id -> {version, arch, os, os_version, is_gateway, startup_time, shutdown_time, graceful}
 peer_lifecycle = {}
 
+# version / arch / os / os_version arrive verbatim from a peer's startup report and are
+# sent on to every dashboard client, which groups and renders them. Bound them
+# where they enter so one peer cannot hand every browser an arbitrarily long
+# string. The longest real value seen is a Windows `ver` line, under 50 chars.
+MAX_PEER_FIELD_LEN = 96
+
+
+def bounded_peer_field(value, default=None):
+    """A peer-reported startup field as a string of bounded length."""
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        value = str(value)
+    return value[:MAX_PEER_FIELD_LEN]
+
+
+# Lifecycle records sent on connect: every peer on the ring, topped up with
+# off-ring peers only while the total is below this.
+LIFECYCLE_FILL_TARGET = 50
+
+
+def lifecycle_peers_for_clients(active_lifecycle, topology_peer_ids):
+    """Split active lifecycle records into (on-ring, off-ring fill).
+
+    Ring peers all go out, so tooltips work. Off-ring peers only fill what is
+    left of LIFECYCLE_FILL_TARGET. The room left must not go negative: as a
+    slice bound, a negative number means "all but the last N", which sent
+    most off-ring peers once the ring passed the target instead of none.
+    """
+    topology_lifecycle = [
+        {"peer_id": pid, **active_lifecycle[pid]}
+        for pid in topology_peer_ids
+        if pid in active_lifecycle
+    ]
+    room = max(0, LIFECYCLE_FILL_TARGET - len(topology_lifecycle))
+    other_lifecycle = [
+        {"peer_id": pid, **data}
+        for pid, data in active_lifecycle.items()
+        if pid not in topology_peer_ids
+    ][:room]
+    return topology_lifecycle, other_lifecycle
+
 # Track pending operations by transaction ID for latency calculation
 # tx_id -> {"op": "put"|"get"|"update", "start_ns": timestamp}
 pending_ops = {}
@@ -2170,12 +2212,12 @@ def process_record(record, store_history=True):
         # and filter later when building topology/stats
         peer_id = canonical_peer_id(attrs.get("peer_id", ""))
         if peer_id:
-            version_str = body.get("version", "unknown")
+            version_str = bounded_peer_field(body.get("version"), "unknown")
             peer_lifecycle[peer_id] = {
                 "version": version_str,
-                "arch": body.get("arch", "unknown"),
-                "os": body.get("os", "unknown"),
-                "os_version": body.get("os_version"),
+                "arch": bounded_peer_field(body.get("arch"), "unknown"),
+                "os": bounded_peer_field(body.get("os"), "unknown"),
+                "os_version": bounded_peer_field(body.get("os_version")),
                 "is_gateway": body.get("is_gateway", False),
                 "startup_time": timestamp,
                 "shutdown_time": None,
@@ -2839,17 +2881,8 @@ def get_network_state():
 
     # Include lifecycle data for topology peers first (so tooltips work),
     # then fill remaining slots with other active peers
-    topology_peer_ids = set(active_peer_ids)
-    topology_lifecycle = [
-        {"peer_id": pid, **active_lifecycle[pid]}
-        for pid in topology_peer_ids
-        if pid in active_lifecycle
-    ]
-    other_lifecycle = [
-        {"peer_id": pid, **data}
-        for pid, data in active_lifecycle.items()
-        if pid not in topology_peer_ids
-    ][:50 - len(topology_lifecycle)]
+    topology_lifecycle, other_lifecycle = lifecycle_peers_for_clients(
+        active_lifecycle, set(active_peer_ids))
 
     # Only send peer_names for active peers (not all historical names)
     # peer_names keys use ip_hash() format (6 hex chars), not anonymize_ip()

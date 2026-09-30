@@ -24,6 +24,7 @@ def srv(tmp_path):
     ws_server.pending_ops.clear()
     ws_server.event_history.clear()
     ws_server.peers.clear()
+    ws_server.peer_lifecycle.clear()
 
     ws_server.op_stats["put"].update(requests=0, successes=0, latencies=[])
     ws_server.op_stats["get"].update(
