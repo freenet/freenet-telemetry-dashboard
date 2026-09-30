@@ -1208,9 +1208,10 @@ def lifecycle_peers_for_clients(active_lifecycle, topology_peer_ids):
 #
 # The snapshot holds production peers only. Startup reports also arrive from
 # CI and simulated networks, a few thousand a day, and carry no IP, so a record
-# qualifies once its peer is on the ring at a public IP. A record that stops
-# being confirmed is dropped from the snapshot after LIFECYCLE_SNAPSHOT_MAX_AGE_NS,
-# so a peer that died while the dashboard was down does not ride along forever.
+# qualifies once its peer has been seen at a public IP: the same records
+# get_network_state counts as active. A record that stops being confirmed is
+# dropped from the snapshot after LIFECYCLE_SNAPSHOT_MAX_AGE_NS, so a peer
+# that died while the dashboard was down does not ride along forever.
 #
 # Restoring a record does not by itself show it to anyone. Every reader of
 # peer_lifecycle (get_network_state, get_version_rollout) already counts only
@@ -1218,7 +1219,7 @@ def lifecycle_peers_for_clients(active_lifecycle, topology_peer_ids):
 # restored peer appears once it is seen again. A new reader needs that filter.
 LIFECYCLE_SNAPSHOT_MAX_AGE_NS = 24 * 60 * 60 * 1_000_000_000
 
-# peer_id -> when the peer was last confirmed on the ring at a public IP
+# peer_id -> when the peer was last confirmed at a public IP
 _lifecycle_confirmed_ns = {}
 
 # Restored peers not yet seen since the restart. After a long outage the
@@ -1230,9 +1231,7 @@ _lifecycle_awaiting_return = set()
 def lifecycle_snapshot(now_ns):
     """The lifecycle records worth carrying across a restart."""
     for pid, ip in attrs_peer_id_to_ip.items():
-        # `ip in peers`: the id-to-IP map is only cleaned for IPs on the ring,
-        # so on its own it would confirm some dead peers indefinitely.
-        if pid in peer_lifecycle and ip in peers and is_public_ip(ip):
+        if pid in peer_lifecycle and is_public_ip(ip):
             _lifecycle_confirmed_ns[pid] = now_ns
             _lifecycle_awaiting_return.discard(pid)
 
@@ -1242,7 +1241,8 @@ def lifecycle_snapshot(now_ns):
         expired = now_ns - confirmed_ns > LIFECYCLE_SNAPSHOT_MAX_AGE_NS
         if data is None or expired or data.get("shutdown_time") is not None:
             del _lifecycle_confirmed_ns[pid]
-            if expired and pid in _lifecycle_awaiting_return:
+            if (expired and pid in _lifecycle_awaiting_return
+                    and pid not in attrs_peer_id_to_ip):
                 # Never came back: nothing else would ever remove it.
                 peer_lifecycle.pop(pid, None)
             _lifecycle_awaiting_return.discard(pid)
@@ -3545,13 +3545,13 @@ async def load_initial_state():
     """
     # Before the replay below, so events the dashboard missed while it was
     # down land on top of the restored records.
-    saved = db.get_meta("peer_lifecycle")
-    if saved:
-        try:
+    try:
+        saved = db.get_meta("peer_lifecycle")
+        if saved:
             restored = restore_lifecycle(orjson.loads(saved), time.time_ns())
             print(f"Restored {restored} peer lifecycle records from DB snapshot", flush=True)
-        except Exception as e:
-            print(f"Failed to restore peer_lifecycle: {e}", flush=True)
+    except Exception as e:
+        print(f"Failed to restore peer_lifecycle: {e}", flush=True)
 
     if not TELEMETRY_LOG.exists():
         return

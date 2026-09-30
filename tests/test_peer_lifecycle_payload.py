@@ -5,6 +5,7 @@ client, so their size is bounded at ingest. The lifecycle list sent on connect
 is every ring peer plus a bounded top-up of off-ring peers.
 """
 import orjson
+import pytest
 
 import ws_server
 
@@ -163,12 +164,53 @@ def test_a_production_peer_survives_a_restart(srv):
     assert srv.peer_lifecycle == {"prod": before}
 
 
-def test_only_peers_on_the_ring_at_a_public_ip_are_snapshotted(srv):
+def test_only_peers_seen_at_a_public_ip_are_snapshotted(srv):
     started(srv, "prod", ip="8.8.8.8")
     started(srv, "docker", ip="127.0.0.1")
-    started(srv, "mapped-but-not-on-ring", ip="8.8.4.4", on_ring=False)
     started(srv, "no-ip-yet")
     assert set(srv.lifecycle_snapshot(NOW)) == {"prod"}
+
+
+def test_the_snapshot_holds_what_the_network_state_counts_as_active(srv):
+    # A peer known only through address fields has an IP but no ring entry.
+    # It is shown as active, so it must not age out of the snapshot.
+    started(srv, "prod", ip="8.8.8.8")
+    started(srv, "off-ring", ip="8.8.4.4", on_ring=False)
+    started(srv, "docker", ip="127.0.0.1")
+    started(srv, "gone", ip="9.9.9.9", shutdown_time=NOW - 5)
+
+    assert srv.get_network_state()["peer_lifecycle"]["active_count"] == 2
+    assert set(srv.lifecycle_snapshot(NOW)) == {"prod", "off-ring"}
+
+
+def event_record(peer_id, **body_fields):
+    body = {"type": "connect_request_sent"}
+    body.update(body_fields)
+    return {
+        "timeUnixNano": "3000",
+        "attributes": [
+            {"key": "event_type", "value": {"stringValue": "connect_request_sent"}},
+            {"key": "peer_id", "value": {"stringValue": f"{peer_id}@0.0.0.0:1 (@ 0.5)"}},
+        ],
+        "body": {"stringValue": orjson.dumps(body).decode()},
+    }
+
+
+@pytest.mark.parametrize("body", [
+    {"this_peer": "prod@8.8.8.8:31337 (@ 0.5)"},
+    {"this_peer_addr": "8.8.8.8:31337"},
+])
+def test_an_ordinary_event_from_a_restored_peer_confirms_it(srv, body):
+    # Through the real event path rather than the seen() helper.
+    started(srv, "prod", ip="8.8.8.8")
+    restart(srv, srv.lifecycle_snapshot(NOW))
+    assert srv._lifecycle_awaiting_return == {"prod"}
+
+    srv.process_record(event_record("prod", **body), store_history=False)
+
+    later = NOW + 23 * HOUR_NS
+    assert srv.lifecycle_snapshot(later)["prod"]["confirmed_ns"] == later
+    assert srv._lifecycle_awaiting_return == set()
 
 
 def test_a_peer_that_shut_down_is_not_snapshotted(srv):
@@ -192,6 +234,17 @@ def test_a_restored_peer_that_never_returns_ages_out(srv):
     # Nothing else would ever remove it, so it leaves memory too.
     assert srv.peer_lifecycle == {}
     assert srv._lifecycle_awaiting_return == set()
+
+
+def test_expiry_does_not_remove_a_record_whose_peer_is_mapped(srv):
+    # Mapped at a non-public address, so never confirmed, but not abandoned:
+    # the stale sweep owns its removal.
+    started(srv, "prod", ip="8.8.8.8")
+    restart(srv, srv.lifecycle_snapshot(NOW))
+    srv.attrs_peer_id_to_ip["prod"] = "10.0.0.5"
+
+    assert srv.lifecycle_snapshot(NOW + srv.LIFECYCLE_SNAPSHOT_MAX_AGE_NS + 1) == {}
+    assert "prod" in srv.peer_lifecycle
 
 
 def test_restarts_do_not_extend_the_life_of_a_peer_that_never_returns(srv):
