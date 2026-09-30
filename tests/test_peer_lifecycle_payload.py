@@ -23,7 +23,6 @@ def startup_record(peer_id, **body_fields):
 
 
 def stored(srv, **body_fields):
-    srv.peer_lifecycle.clear()
     srv.process_record(startup_record("peerA", **body_fields), store_history=False)
     (record,) = srv.peer_lifecycle.values()
     return record
@@ -51,12 +50,25 @@ def test_missing_startup_fields_keep_their_defaults(srv):
     assert record["os_version"] is None
 
 
-def test_non_string_startup_fields_become_bounded_strings(srv):
-    record = stored(srv, os=["linux"] * 1000, arch=64, os_version={"a": 1})
+def test_non_string_startup_fields_become_bounded_strings(srv, monkeypatch):
+    # record_version keeps what it is given in module globals.
+    monkeypatch.setattr(srv, "_seen_versions", set())
+    monkeypatch.setattr(srv, "version_markers", [])
+    record = stored(srv, version=["0.2.90"], os=["linux"] * 1000, arch=64,
+                    os_version={"a": 1})
+    assert record["version"] == "['0.2.90']"
     assert record["arch"] == "64"
-    for field in ("os", "arch", "os_version"):
-        assert isinstance(record[field], str), field
-        assert len(record[field]) <= ws_server.MAX_PEER_FIELD_LEN, field
+    assert record["os_version"] == "{'a': 1}"
+    assert record["os"] == str(["linux"] * 1000)[:ws_server.MAX_PEER_FIELD_LEN]
+    # The version tracker gets the same bounded string.
+    assert srv.version_markers == [(1000, "['0.2.90']")]
+
+
+def test_oversized_version_is_truncated(srv, monkeypatch):
+    monkeypatch.setattr(srv, "_seen_versions", set())
+    monkeypatch.setattr(srv, "version_markers", [])
+    record = stored(srv, version="9" * 10_000)
+    assert record["version"] == "9" * ws_server.MAX_PEER_FIELD_LEN
 
 
 def lifecycle(n, prefix):
@@ -69,6 +81,14 @@ def test_off_ring_peers_fill_only_the_room_left():
     topo, other = ws_server.lifecycle_peers_for_clients({**ring, **off}, set(ring))
     assert len(topo) == 30
     assert len(other) == ws_server.LIFECYCLE_FILL_TARGET - 30
+
+
+def test_no_off_ring_peers_when_the_ring_is_exactly_the_target():
+    ring = lifecycle(ws_server.LIFECYCLE_FILL_TARGET, "ring")
+    off = lifecycle(40, "off")
+    topo, other = ws_server.lifecycle_peers_for_clients({**ring, **off}, set(ring))
+    assert len(topo) == ws_server.LIFECYCLE_FILL_TARGET
+    assert other == []
 
 
 def test_no_off_ring_peers_once_the_ring_passes_the_target():

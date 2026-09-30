@@ -1158,7 +1158,7 @@ def _load_version_history():
 # peer_id -> {version, arch, os, os_version, is_gateway, startup_time, shutdown_time, graceful}
 peer_lifecycle = {}
 
-# arch / os / os_version arrive verbatim from a peer's startup report and are
+# version / arch / os / os_version arrive verbatim from a peer's startup report and are
 # sent on to every dashboard client, which groups and renders them. Bound them
 # where they enter so one peer cannot hand every browser an arbitrarily long
 # string. The longest real value seen is a Windows `ver` line, under 50 chars.
@@ -2212,7 +2212,7 @@ def process_record(record, store_history=True):
         # and filter later when building topology/stats
         peer_id = canonical_peer_id(attrs.get("peer_id", ""))
         if peer_id:
-            version_str = body.get("version", "unknown")
+            version_str = bounded_peer_field(body.get("version"), "unknown")
             peer_lifecycle[peer_id] = {
                 "version": version_str,
                 "arch": bounded_peer_field(body.get("arch"), "unknown"),
