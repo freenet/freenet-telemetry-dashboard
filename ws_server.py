@@ -1200,6 +1200,81 @@ def lifecycle_peers_for_clients(active_lifecycle, topology_peer_ids):
     ][:room]
     return topology_lifecycle, other_lifecycle
 
+
+# peer_lifecycle is built only from peer_startup events, and a restart resumes
+# the log from its stored offset, so without a snapshot every restart forgot
+# each peer that had started before it: version, OS and arch were known only
+# for peers that happened to start since the last restart.
+#
+# The snapshot holds production peers only. Startup reports also arrive from
+# CI and simulated networks, a few thousand a day, and carry no IP, so a record
+# qualifies once its peer has been seen at a public IP: the same records
+# get_network_state counts as active. A record that stops being confirmed is
+# dropped from the snapshot after LIFECYCLE_SNAPSHOT_MAX_AGE_NS, so a peer
+# that died while the dashboard was down does not ride along forever.
+#
+# Restoring a record does not by itself show it to anyone. Every reader of
+# peer_lifecycle (get_network_state, get_version_rollout) already counts only
+# peers in attrs_peer_id_to_ip at a public IP, and that map starts empty, so a
+# restored peer appears once it is seen again. A new reader needs that filter.
+LIFECYCLE_SNAPSHOT_MAX_AGE_NS = 24 * 60 * 60 * 1_000_000_000
+
+# peer_id -> when the peer was last confirmed at a public IP
+_lifecycle_confirmed_ns = {}
+
+# Restored peers not yet seen since the restart. After a long outage the
+# replayed log carries old timestamps, so the first stale sweep would discard
+# peers that are in fact still running; cleanup_stale_peers leaves these alone.
+_lifecycle_awaiting_return = set()
+
+
+def lifecycle_snapshot(now_ns):
+    """The lifecycle records worth carrying across a restart."""
+    for pid, ip in attrs_peer_id_to_ip.items():
+        if pid in peer_lifecycle and is_public_ip(ip):
+            _lifecycle_confirmed_ns[pid] = now_ns
+            _lifecycle_awaiting_return.discard(pid)
+
+    snapshot = {}
+    for pid, confirmed_ns in list(_lifecycle_confirmed_ns.items()):
+        data = peer_lifecycle.get(pid)
+        expired = now_ns - confirmed_ns > LIFECYCLE_SNAPSHOT_MAX_AGE_NS
+        if data is None or expired or data.get("shutdown_time") is not None:
+            del _lifecycle_confirmed_ns[pid]
+            if (expired and pid in _lifecycle_awaiting_return
+                    and pid not in attrs_peer_id_to_ip):
+                # Never came back: nothing else would ever remove it.
+                peer_lifecycle.pop(pid, None)
+            _lifecycle_awaiting_return.discard(pid)
+            continue
+        snapshot[pid] = {**data, "confirmed_ns": confirmed_ns}
+    return snapshot
+
+
+def restore_lifecycle(snapshot, now_ns):
+    """Load a lifecycle_snapshot() back in, returning how many were restored.
+
+    Call before replaying the log, so that a startup or shutdown the dashboard
+    missed while it was down is applied on top of the restored record.
+    """
+    if not isinstance(snapshot, dict):
+        return 0
+    restored = 0
+    for pid, saved in snapshot.items():
+        if not isinstance(saved, dict):
+            continue
+        data = dict(saved)
+        confirmed_ns = data.pop("confirmed_ns", None)
+        if not isinstance(confirmed_ns, int) or pid in peer_lifecycle:
+            continue
+        if now_ns - confirmed_ns > LIFECYCLE_SNAPSHOT_MAX_AGE_NS:
+            continue
+        peer_lifecycle[pid] = data
+        _lifecycle_confirmed_ns[pid] = confirmed_ns
+        _lifecycle_awaiting_return.add(pid)
+        restored += 1
+    return restored
+
 # Track pending operations by transaction ID for latency calculation
 # tx_id -> {"op": "put"|"get"|"update", "start_ns": timestamp}
 pending_ops = {}
@@ -1407,7 +1482,8 @@ def cleanup_stale_peers():
 
     # 7. Remove from peer_lifecycle
     for pid in stale_peer_ids:
-        peer_lifecycle.pop(pid, None)
+        if pid not in _lifecycle_awaiting_return:
+            peer_lifecycle.pop(pid, None)
 
     # 8. Remove connections involving stale peers
     removed_connections = []
@@ -3182,6 +3258,14 @@ async def periodic_cleanup():
         except Exception as e:
             print(f"[cleanup] Error during periodic cleanup: {e}")
 
+        # On its own so that a failure above cannot stop it being written.
+        # Written even when empty, so a stored snapshot cannot outlive its peers.
+        try:
+            lifecycle = lifecycle_snapshot(time.time_ns())
+            db.set_meta("peer_lifecycle", orjson.dumps(lifecycle).decode())
+        except Exception as e:
+            print(f"[cleanup] Error snapshotting peer_lifecycle: {e}")
+
 
 async def tail_log():
     """Tail the telemetry log and broadcast new events.
@@ -3459,6 +3543,16 @@ async def load_initial_state():
     (peers, connections, contract_states, etc.) but can resume from where we
     left off using the stored byte offset.
     """
+    # Before the replay below, so events the dashboard missed while it was
+    # down land on top of the restored records.
+    try:
+        saved = db.get_meta("peer_lifecycle")
+        if saved:
+            restored = restore_lifecycle(orjson.loads(saved), time.time_ns())
+            print(f"Restored {restored} peer lifecycle records from DB snapshot", flush=True)
+    except Exception as e:
+        print(f"Failed to restore peer_lifecycle: {e}", flush=True)
+
     if not TELEMETRY_LOG.exists():
         return
 
@@ -3559,7 +3653,6 @@ async def load_initial_state():
                 print(f"Restored {len(contract_propagation)} propagation entries from DB snapshot", flush=True)
             except Exception as e:
                 print(f"Failed to restore contract_propagation: {e}", flush=True)
-
     # Precompute propagation from DB for contracts missing from snapshot
     precompute_propagation_from_db()
 
