@@ -34,14 +34,44 @@ function escapeHtml(s) {
     ));
 }
 
+// Other values Rust's std::env::consts::OS can report, spelled the way people write them.
+const OTHER_LABEL = {
+    freebsd: 'FreeBSD',
+    openbsd: 'OpenBSD',
+    netbsd: 'NetBSD',
+    dragonfly: 'DragonFly BSD',
+    ios: 'iOS',
+    solaris: 'Solaris',
+    illumos: 'illumos',
+};
+
+// The four main families keep their own key. Anything else is keyed by its own
+// name, so FreeBSD and OpenBSD peers are two families rather than one.
 function familyOf(os) {
     const key = String(os || '').toLowerCase();
-    return FAMILY_ORDER.includes(key) ? key : 'other';
+    if (FAMILY_ORDER.includes(key)) return key;
+    return key ? `other:${key}` : 'other';
 }
 
 function familyLabel(key, rawOs) {
-    if (key === 'other') return rawOs ? String(rawOs) : 'Other';
-    return FAMILY_LABEL[key];
+    if (FAMILY_LABEL[key]) return FAMILY_LABEL[key];
+    const name = key.startsWith('other:') ? key.slice('other:'.length) : '';
+    // Own properties only: the name comes from the peer, and a plain lookup of
+    // "constructor" or "__proto__" would hand back Object's own members.
+    if (Object.hasOwn(OTHER_LABEL, name)) return OTHER_LABEL[name];
+    return rawOs ? String(rawOs) : 'Other';
+}
+
+// "Debian GNU/Linux 13 (trixie)" -> "Debian GNU/Linux 13". A string scan rather
+// than a regex: os_version comes from the peer, and an unanchored
+// /\s*\([^)]*\)\s*$/ backtracks quadratically on long input.
+function stripTrailingParenthetical(s) {
+    const trimmed = s.trimEnd();
+    if (!trimmed.endsWith(')')) return trimmed;
+    const open = trimmed.lastIndexOf('(');
+    // Only a single well-formed group: "Foo (a (b))" or "Foo (a) bar)" stay as reported.
+    if (open < 0 || trimmed.slice(open + 1, -1).includes(')')) return trimmed;
+    return trimmed.slice(0, open).trimEnd();
 }
 
 /**
@@ -87,7 +117,8 @@ export function releaseLabel(os, osVersion) {
             const match = raw.match(pattern);
             if (match) return template.replace('$1', match[1]);
         }
-        return raw.replace(/\s*\([^)]*\)\s*$/, '');
+        // A name that is nothing but a parenthetical would otherwise become a blank row.
+        return stripTrailingParenthetical(raw) || raw;
     }
 
     return raw || familyLabel(family, os);
@@ -188,7 +219,7 @@ function render() {
 
     html += `<div class="os-families">`;
     for (const family of data.families) {
-        const color = FAMILY_COLOR[family.key] || FAMILY_COLOR.other;
+        const color = FAMILY_COLOR[family.key] || FAMILY_COLOR.other;  // every other:* family shares one colour
         const width = Math.max(2, Math.round((family.count / data.reported) * 100));
         html += `
             <section class="os-family">

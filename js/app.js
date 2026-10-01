@@ -272,6 +272,11 @@ window.clearAllFilters = clearAllFilters;
  * Switch between Contracts and Performance tabs in the right panel
  */
 function switchRightTab(tab) {
+    // A page loaded before the OS tab existed has no panel for it; land on Contracts
+    // and say so in the state and URL, rather than showing one tab and recording another.
+    if (tab === 'os' && !(document.getElementById('os-panel-content') && document.getElementById('tab-os'))) {
+        tab = 'contracts';
+    }
     state.rightPanelTab = tab;
     const contractsContent = document.getElementById('contracts-panel-content');
     const performanceContent = document.getElementById('performance-panel-content');
