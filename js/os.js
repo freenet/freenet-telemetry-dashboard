@@ -56,7 +56,10 @@ function familyOf(os) {
 function familyLabel(key, rawOs) {
     if (FAMILY_LABEL[key]) return FAMILY_LABEL[key];
     const name = key.startsWith('other:') ? key.slice('other:'.length) : '';
-    return OTHER_LABEL[name] || (rawOs ? String(rawOs) : 'Other');
+    // Own properties only: the name comes from the peer, and a plain lookup of
+    // "constructor" or "__proto__" would hand back Object's own members.
+    if (Object.hasOwn(OTHER_LABEL, name)) return OTHER_LABEL[name];
+    return rawOs ? String(rawOs) : 'Other';
 }
 
 // "Debian GNU/Linux 13 (trixie)" -> "Debian GNU/Linux 13". A string scan rather
@@ -66,7 +69,8 @@ function stripTrailingParenthetical(s) {
     const trimmed = s.trimEnd();
     if (!trimmed.endsWith(')')) return trimmed;
     const open = trimmed.lastIndexOf('(');
-    if (open < 0) return trimmed;
+    // Only a single well-formed group: "Foo (a (b))" or "Foo (a) bar)" stay as reported.
+    if (open < 0 || trimmed.slice(open + 1, -1).includes(')')) return trimmed;
     return trimmed.slice(0, open).trimEnd();
 }
 

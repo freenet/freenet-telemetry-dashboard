@@ -89,3 +89,12 @@ def test_the_note_gives_the_ring_size_only_when_known():
 
 def test_no_reports_shows_the_empty_state():
     assert "No operating-system data yet" in render([])
+
+
+def test_prototype_names_from_a_peer_are_plain_labels():
+    # A plain object lookup of these returned Object's own members, and the
+    # pair together made the family sort throw, blanking the tab for everyone.
+    html = render([peer("constructor"), peer("__proto__"), peer("toString"), peer("linux")])
+    names = [s.split("</span>")[0] for s in html.split('class="os-family-name">')[1:]]
+    assert sorted(names) == sorted(["Linux", "constructor", "__proto__", "toString"])
+    assert "native code" not in html and "[object Object]" not in html

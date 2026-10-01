@@ -119,8 +119,11 @@ def test_a_trailing_parenthetical_is_dropped_without_blanking_the_name():
         {"os": "linux", "os_version": "Gentoo Linux (rolling)"},
         {"os": "linux", "os_version": "Some Distro 3 (Code Name)  "},
         {"os": "linux", "os_version": "(just a codename)"},
+        {"os": "linux", "os_version": "Foo (a (b))"},
+        {"os": "linux", "os_version": "Foo (a) bar)"},
     ])
-    assert got == ["Gentoo Linux", "Some Distro 3", "(just a codename)"]
+    assert got == ["Gentoo Linux", "Some Distro 3", "(just a codename)",
+                   "Foo (a (b))", "Foo (a) bar)"]
 
 
 def test_a_long_hostile_version_string_is_handled_in_linear_time():
