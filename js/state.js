@@ -55,7 +55,7 @@ export const state = {
     peerResources: {},
 
     // Right panel tab
-    rightPanelTab: 'contracts',  // 'contracts' | 'performance' | 'versions' | 'resources'
+    rightPanelTab: 'contracts',  // 'contracts' | 'performance' | 'versions' | 'os' | 'resources'
 
     // Display
     displayedEvents: [],

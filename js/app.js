@@ -31,6 +31,7 @@ import { initTransferChart, addTransferEvents, addTransferEvent, renderTransferC
 import { updateContractTree, getTreeStats, resetContractTree, triggerTreeMessageAnim, buildTree } from './contract-tree.js';
 import { initMetricsChart, updateMetricsChart, destroyMetricsChart } from './metrics.js';
 import { initVersionsChart, updateVersionsChart, destroyVersionsChart } from './versions.js';
+import { initOsPanel, updateOsPanel, destroyOsPanel } from './os.js';
 import { initResourcesPanel, updateResourcesPanel, destroyResourcesPanel } from './resources.js';
 import { initChecksPanel, destroyChecksPanel } from './checks.js';
 
@@ -275,11 +276,13 @@ function switchRightTab(tab) {
     const contractsContent = document.getElementById('contracts-panel-content');
     const performanceContent = document.getElementById('performance-panel-content');
     const versionsContent = document.getElementById('versions-panel-content');
+    const osContent = document.getElementById('os-panel-content');
     const resourcesContent = document.getElementById('resources-panel-content');
     const checksContent = document.getElementById('checks-panel-content');
     const tabContracts = document.getElementById('tab-contracts');
     const tabPerformance = document.getElementById('tab-performance');
     const tabVersions = document.getElementById('tab-versions');
+    const tabOs = document.getElementById('tab-os');
     const tabResources = document.getElementById('tab-resources');
     const tabChecks = document.getElementById('tab-checks');
 
@@ -287,15 +290,18 @@ function switchRightTab(tab) {
     contractsContent.style.display = 'none';
     performanceContent.style.display = 'none';
     versionsContent.style.display = 'none';
+    if (osContent) osContent.style.display = 'none';
     resourcesContent.style.display = 'none';
     if (checksContent) checksContent.style.display = 'none';
     tabContracts.classList.remove('active');
     tabPerformance.classList.remove('active');
     tabVersions.classList.remove('active');
+    if (tabOs) tabOs.classList.remove('active');
     tabResources.classList.remove('active');
     if (tabChecks) tabChecks.classList.remove('active');
     destroyMetricsChart();
     destroyVersionsChart();
+    destroyOsPanel();
     destroyResourcesPanel();
     destroyChecksPanel();
 
@@ -309,6 +315,10 @@ function switchRightTab(tab) {
         tabVersions.classList.add('active');
         const container = document.getElementById('versions-chart-container');
         initVersionsChart(container);
+    } else if (tab === 'os') {
+        osContent.style.display = 'flex';
+        tabOs.classList.add('active');
+        initOsPanel(document.getElementById('os-container'));
     } else if (tab === 'resources') {
         resourcesContent.style.display = 'flex';
         tabResources.classList.add('active');
@@ -402,6 +412,11 @@ connect({
         }
         if (state.rightPanelTab === 'versions') {
             updateVersionsChart();
+        }
+    },
+    onLifecycleData: () => {
+        if (state.rightPanelTab === 'os') {
+            updateOsPanel();
         }
     },
     onFlowsResult: (data) => {
