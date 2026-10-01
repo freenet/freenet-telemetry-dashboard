@@ -315,7 +315,7 @@ function switchRightTab(tab) {
         tabVersions.classList.add('active');
         const container = document.getElementById('versions-chart-container');
         initVersionsChart(container);
-    } else if (tab === 'os') {
+    } else if (tab === 'os' && osContent && tabOs) {
         osContent.style.display = 'flex';
         tabOs.classList.add('active');
         initOsPanel(document.getElementById('os-container'));

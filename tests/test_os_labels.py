@@ -15,7 +15,10 @@ import pytest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 NODE = shutil.which("node")
-pytestmark = pytest.mark.skipif(NODE is None, reason="node is required to import js/os.js")
+# Skipped only off CI. In CI node is installed on purpose, so a missing node must
+# fail rather than leave these silently unverified.
+pytestmark = pytest.mark.skipif(NODE is None and not os.environ.get("CI"),
+                                reason="node is required to import js/os.js")
 
 SCRIPT = """
 import { releaseLabel } from './js/os.js';
@@ -109,3 +112,29 @@ def test_macos_and_android_keep_a_short_name():
         "Android",
         "FreeBSD 14.2",
     ]
+
+
+def test_a_trailing_parenthetical_is_dropped_without_blanking_the_name():
+    got = labels([
+        {"os": "linux", "os_version": "Gentoo Linux (rolling)"},
+        {"os": "linux", "os_version": "Some Distro 3 (Code Name)  "},
+        {"os": "linux", "os_version": "(just a codename)"},
+    ])
+    assert got == ["Gentoo Linux", "Some Distro 3", "(just a codename)"]
+
+
+def test_a_long_hostile_version_string_is_handled_in_linear_time():
+    # os_version comes from the peer. The regex this replaced took about 2.3s
+    # on 40k characters of whitespace, freezing the tab for every viewer. The
+    # strings are built inside node: they are too long for an environment variable.
+    proc = subprocess.run(
+        [NODE, "--input-type=module", "-e",
+         "import { releaseLabel } from './js/os.js';"
+         "const cases = [' '.repeat(100000) + 'x', '('.repeat(100000), ' ('.repeat(50000) + ')'];"
+         "const t = performance.now();"
+         "for (const v of cases) releaseLabel('linux', v);"
+         "process.stdout.write(String(performance.now() - t));"],
+        cwd=REPO, capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert float(proc.stdout) < 200, f"took {proc.stdout} ms"
