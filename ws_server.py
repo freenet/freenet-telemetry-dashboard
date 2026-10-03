@@ -9,6 +9,7 @@ Supports time-travel by buffering event history.
 
 import asyncio
 import hashlib
+import ipaddress
 import re
 import sys
 import threading
@@ -39,6 +40,20 @@ except ImportError:
 TELEMETRY_LOG = Path(os.environ.get(
     "FREENET_TELEMETRY_LOG", "/mnt/media/freenet-telemetry/logs.jsonl"))
 WS_PORT = int(os.environ.get("FREENET_DASHBOARD_WS_PORT", "3134"))
+# Loopback by default. Browsers reach this server only through the reverse
+# proxy's same-origin /ws path, and the client IP is read from the proxy's
+# X-Forwarded-For header (see client_ip_for). That header is honoured from any
+# loopback peer, so the server must not be reachable from other hosts. Local
+# processes on this machine can still connect and set the header; that is
+# accepted, since they are inside the trust boundary. Override only for local
+# development. An empty value is treated as unset, because an empty host makes
+# websockets.serve listen on every interface.
+DEFAULT_WS_HOST = "127.0.0.1"
+
+
+def ws_host():
+    """Bind host for the WebSocket server, from FREENET_DASHBOARD_WS_HOST."""
+    return os.environ.get("FREENET_DASHBOARD_WS_HOST", "").strip() or DEFAULT_WS_HOST
 PEER_NAMES_FILE = Path(os.environ.get(
     "FREENET_PEER_NAMES_FILE", "/var/www/freenet-dashboard/peer_names.json"))
 
@@ -3343,12 +3358,43 @@ client_real_ips = {}
 client_priority = {}  # connection id -> bool (is priority user)
 
 
+TRUSTED_PROXY_IPS = frozenset({"127.0.0.1", "::1"})
+
+
+def client_ip_for(remote_address, forwarded_for):
+    """Return the client IP for a connection.
+
+    forwarded_for is the list of X-Forwarded-For header values (one per header
+    line). The header is honoured only when the TCP peer is loopback, i.e. the
+    local reverse proxy. From any other peer it is client-controlled, so the
+    socket's own remote address is used instead. An IPv4-mapped address such
+    as ::ffff:127.0.0.1 is deliberately not treated as loopback, so it fails
+    closed to the peer address.
+
+    The RIGHTMOST entry is used: it is the one the proxy itself appended, which
+    stays correct whether the proxy replaces the header (the current setup) or
+    appends to it (if it is ever configured to trust an upstream proxy). An
+    entry that is not a valid IP address is ignored.
+    """
+    peer_ip = remote_address[0] if remote_address else None
+    if peer_ip not in TRUSTED_PROXY_IPS:
+        return peer_ip
+    entries = [e.strip() for value in forwarded_for for e in value.split(",")]
+    entries = [e for e in entries if e]
+    if not entries:
+        return peer_ip
+    try:
+        return str(ipaddress.ip_address(entries[-1]))
+    except ValueError:
+        return peer_ip
+
+
 async def process_request(connection, request):
-    """Capture X-Forwarded-For header and priority token before WebSocket handshake."""
+    """Capture the client IP and priority token before the WebSocket handshake."""
     # Store the real client IP for later use in handle_client
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    if forwarded_for:
-        real_ip = forwarded_for.split(",")[0].strip()
+    real_ip = client_ip_for(
+        connection.remote_address, request.headers.get_all("X-Forwarded-For"))
+    if real_ip:
         client_real_ips[id(connection)] = real_ip
 
     # Check for returning user token in query params
@@ -3377,6 +3423,8 @@ async def handle_client(websocket):
     """Handle a WebSocket client connection."""
     conn_id = id(websocket)
     is_priority = client_priority.pop(conn_id, False)
+    # Pop before any early return so rejected connections do not leak entries.
+    client_ip = client_real_ips.pop(conn_id, None)
 
     # Connection limiting with priority reservation
     current_clients = len(clients)
@@ -3393,8 +3441,7 @@ async def handle_client(websocket):
         await websocket.close(1013, "Server busy - returning users have priority. Please try again later")
         return
 
-    # Get client IP - check stored X-Forwarded-For first, then fall back to remote_address
-    client_ip = client_real_ips.pop(conn_id, None)
+    # Use the client IP resolved by process_request, falling back to remote_address
     if not client_ip and websocket.remote_address:
         client_ip = websocket.remote_address[0]
 
@@ -3671,6 +3718,21 @@ async def load_initial_state():
         print(f"  {ck[:20]}... has {len(sub['subscribers'])} subscribers", flush=True)
 
 
+def serve_websocket():
+    """Create the WebSocket server (an async context manager)."""
+    host = ws_host()
+    print(f"Starting WebSocket server on {host}:{WS_PORT}...")
+    # permessage-deflate provides ~40x compression for JSON data
+    return websockets.serve(
+        handle_client,
+        host,
+        WS_PORT,
+        compression="deflate",  # Per-message compression
+        max_size=50 * 1024 * 1024,  # 50MB max message size for large history
+        process_request=process_request,  # Capture X-Forwarded-For headers
+    )
+
+
 async def main():
     """Main entry point."""
     # Initialize SQLite database
@@ -3697,16 +3759,7 @@ async def main():
     # add new indexes. See SCHEMA_INDEXES in telemetry_db.py for the list.
 
     # Start WebSocket server with compression enabled
-    # permessage-deflate provides ~40x compression for JSON data
-    print(f"Starting WebSocket server on port {WS_PORT}...")
-    async with websockets.serve(
-        handle_client,
-        "0.0.0.0",
-        WS_PORT,
-        compression="deflate",  # Per-message compression
-        max_size=50 * 1024 * 1024,  # 50MB max message size for large history
-        process_request=process_request,  # Capture X-Forwarded-For headers
-    ):
+    async with serve_websocket():
         # Start log tailer, event buffer flusher, and periodic cleanup concurrently
         await asyncio.gather(
             tail_log(),
