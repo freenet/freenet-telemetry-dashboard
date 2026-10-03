@@ -39,6 +39,12 @@ except ImportError:
 TELEMETRY_LOG = Path(os.environ.get(
     "FREENET_TELEMETRY_LOG", "/mnt/media/freenet-telemetry/logs.jsonl"))
 WS_PORT = int(os.environ.get("FREENET_DASHBOARD_WS_PORT", "3134"))
+# Loopback by default. Browsers reach this server only through the reverse
+# proxy's same-origin /ws path, and the client IP is read from the proxy's
+# X-Forwarded-For header (see client_ip_for). That header is only trustworthy
+# when the proxy is the only thing that can connect, so the server must not be
+# reachable from other hosts. Override only for local development.
+WS_HOST = os.environ.get("FREENET_DASHBOARD_WS_HOST", "127.0.0.1")
 PEER_NAMES_FILE = Path(os.environ.get(
     "FREENET_PEER_NAMES_FILE", "/var/www/freenet-dashboard/peer_names.json"))
 
@@ -3343,12 +3349,29 @@ client_real_ips = {}
 client_priority = {}  # connection id -> bool (is priority user)
 
 
+TRUSTED_PROXY_IPS = frozenset({"127.0.0.1", "::1"})
+
+
+def client_ip_for(remote_address, forwarded_for):
+    """Return the client IP for a connection.
+
+    X-Forwarded-For is honoured only when the TCP peer is loopback, i.e. the
+    local reverse proxy, which overwrites the header for untrusted clients.
+    From any other peer the header is client-controlled, so the socket's own
+    remote address is used instead.
+    """
+    peer_ip = remote_address[0] if remote_address else None
+    if peer_ip in TRUSTED_PROXY_IPS and forwarded_for:
+        return forwarded_for.split(",")[0].strip() or peer_ip
+    return peer_ip
+
+
 async def process_request(connection, request):
-    """Capture X-Forwarded-For header and priority token before WebSocket handshake."""
+    """Capture the client IP and priority token before the WebSocket handshake."""
     # Store the real client IP for later use in handle_client
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    if forwarded_for:
-        real_ip = forwarded_for.split(",")[0].strip()
+    real_ip = client_ip_for(
+        connection.remote_address, request.headers.get("X-Forwarded-For", ""))
+    if real_ip:
         client_real_ips[id(connection)] = real_ip
 
     # Check for returning user token in query params
@@ -3393,7 +3416,7 @@ async def handle_client(websocket):
         await websocket.close(1013, "Server busy - returning users have priority. Please try again later")
         return
 
-    # Get client IP - check stored X-Forwarded-For first, then fall back to remote_address
+    # Get client IP resolved by process_request, falling back to remote_address
     client_ip = client_real_ips.pop(conn_id, None)
     if not client_ip and websocket.remote_address:
         client_ip = websocket.remote_address[0]
@@ -3698,10 +3721,10 @@ async def main():
 
     # Start WebSocket server with compression enabled
     # permessage-deflate provides ~40x compression for JSON data
-    print(f"Starting WebSocket server on port {WS_PORT}...")
+    print(f"Starting WebSocket server on {WS_HOST}:{WS_PORT}...")
     async with websockets.serve(
         handle_client,
-        "0.0.0.0",
+        WS_HOST,
         WS_PORT,
         compression="deflate",  # Per-message compression
         max_size=50 * 1024 * 1024,  # 50MB max message size for large history
