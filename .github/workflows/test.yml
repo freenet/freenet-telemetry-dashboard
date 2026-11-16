@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         # The client/server agreement tests drive the real js/events.js through
         # node rather than reimplementing it. They skip without node, so it has
         # to be present here or the agreement is silently unverified.
@@ -41,7 +41,7 @@ jobs:
           python-version: '3.12'
       - name: Byte-compile the Python entry points
         run: python -m py_compile ws_server.py telemetry_db.py backfill_db.py create_indexes.py
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
       - name: Parse the browser modules
