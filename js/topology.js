@@ -803,17 +803,17 @@ function startTreeEdgeAnimation(container) {
         if (hasSelection) {
             // Dim edges
             ctx.lineWidth = 0.75;
-            ctx.strokeStyle = 'rgba(126, 207, 239, 0.08)';
+            ctx.strokeStyle = 'rgba(133, 200, 230, 0.08)';
             ctx.stroke(dimPath);
             // Highlighted edges
             ctx.lineWidth = 1.5;
-            ctx.strokeStyle = 'rgba(126, 207, 239, 0.6)';
+            ctx.strokeStyle = 'rgba(133, 200, 230, 0.6)';
             ctx.stroke(highlightPath);
         } else {
             ctx.lineWidth = treeAnimEdges.length > 80 ? 0.75 : 1.25;
             ctx.strokeStyle = treeAnimEdges.length > 80
-                ? 'rgba(126, 207, 239, 0.15)'
-                : 'rgba(126, 207, 239, 0.4)';
+                ? 'rgba(133, 200, 230, 0.15)'
+                : 'rgba(133, 200, 230, 0.4)';
             ctx.stroke(normalPath);
         }
 
@@ -866,7 +866,7 @@ function getOrCreateStaticSvg() {
             <stop offset="100%" style="stop-color:var(--bg-secondary);stop-opacity:1" />
         </linearGradient>
         <marker id="arrow-connect" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#7ecfef"/>
+            <polygon points="0 0, 8 3, 0 6" fill="#85c8e6"/>
         </marker>
         <marker id="arrow-put" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#b58900"/>
@@ -1049,7 +1049,7 @@ export function updateRingSVG(peers, connections, subscriberPeerIds = new Set(),
             tick.setAttribute('y1', ringY);
             tick.setAttribute('x2', CENTER + (markerR - 10) * cosA);
             tick.setAttribute('y2', CENTER + (markerR - 10) * sinA);
-            tick.setAttribute('stroke', '#7ecfef');
+            tick.setAttribute('stroke', '#85c8e6');
             tick.setAttribute('stroke-width', '1');
             tick.setAttribute('stroke-opacity', '0.6');
             dynamicGroup.appendChild(tick);
@@ -1060,7 +1060,7 @@ export function updateRingSVG(peers, connections, subscriberPeerIds = new Set(),
             diamond.setAttribute('text-anchor', 'middle');
             diamond.setAttribute('dominant-baseline', 'central');
             diamond.setAttribute('font-size', '26');
-            diamond.setAttribute('fill', '#7ecfef');
+            diamond.setAttribute('fill', '#85c8e6');
             diamond.setAttribute('style', 'pointer-events: none;');
             diamond.textContent = '\u25CE';
             dynamicGroup.appendChild(diamond);
@@ -1347,7 +1347,7 @@ function drawConnectionsCanvas(ctx, peers, connections, subscriberPeerIds = new 
     const focusPeerId = state.selectedPeerId || null;
 
     // Determine connection color based on focused peer type
-    let focusConnColor = '0, 127, 255'; // default blue
+    let focusConnColor = '58, 123, 203'; // default blue
     if (focusPeerId) {
         const isYou = focusPeerId === state.yourPeerId;
         const focusPeerData = peers.get(focusPeerId);
@@ -1392,7 +1392,7 @@ function drawConnectionsCanvas(ctx, peers, connections, subscriberPeerIds = new 
             color = focusConnColor;
         } else {
             opacity = (isFocusConn && !showAllConnections) ? 0.6 : 0.3;
-            color = isFocusConn ? focusConnColor : '0, 127, 255';
+            color = isFocusConn ? focusConnColor : '58, 123, 203';
         }
 
         // Curved connections for focused peer, straight for background
@@ -1499,7 +1499,7 @@ function stopConnectionAnimation() {
 
 // Event type colors for hovered event line (matches CSS vars)
 const EVENT_LINE_COLORS = {
-    connect:   '#7ecfef',
+    connect:   '#85c8e6',
     put:       '#b58900',
     get:       '#859900',
     update:    '#6c71c4',
@@ -1942,8 +1942,8 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
         const isYou = id === state.yourPeerId;
         const isSubscriber = subscriberPeerIds.has(id);
 
-        let fillColor = '#007FFF';
-        let glowColor = 'rgba(0, 127, 255, 0.2)';
+        let fillColor = '#3a7bcb';
+        let glowColor = 'rgba(58, 123, 203, 0.2)';
         let label = '';
         let peerStateHash = null;
         let isNonSubscriber = false;
@@ -1976,8 +1976,8 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
             fillColor = '#dc322f';
             glowColor = 'rgba(220, 50, 47, 0.3)';
         } else if (isPeerSelected && !isYou) {
-            fillColor = '#7ecfef';
-            glowColor = 'rgba(126, 207, 239, 0.4)';
+            fillColor = '#85c8e6';
+            glowColor = 'rgba(133, 200, 230, 0.4)';
         } else if (isEventHovered) {
             fillColor = '#b58900';
             glowColor = 'rgba(181, 137, 0, 0.5)';
@@ -2119,13 +2119,13 @@ function drawPeersCanvas(ctx, peers, connections, subscriberPeerIds, callbacks, 
     // --- Pass 3.5: Selection ring (visible ring around selected peer) ---
     for (const d of peerRenderData) {
         if (!d.isPeerSelected) continue;
-        ctx.strokeStyle = d.isYou ? '#2aa198' : '#7ecfef';
+        ctx.strokeStyle = d.isYou ? '#2aa198' : '#85c8e6';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(d.pos.x, d.pos.y, d.nodeSize + 4, 0, Math.PI * 2);
         ctx.stroke();
         // Outer glow ring
-        ctx.strokeStyle = d.isYou ? 'rgba(16, 185, 129, 0.3)' : 'rgba(126, 207, 239, 0.3)';
+        ctx.strokeStyle = d.isYou ? 'rgba(16, 185, 129, 0.3)' : 'rgba(133, 200, 230, 0.3)';
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.arc(d.pos.x, d.pos.y, d.nodeSize + 7, 0, Math.PI * 2);

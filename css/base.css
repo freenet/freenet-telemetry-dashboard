@@ -4,22 +4,22 @@
             --bg-tertiary: #161b22;
             --bg-panel: rgba(13, 17, 23, 0.8);
             --border-color: rgba(48, 54, 61, 0.6);
-            --border-glow: rgba(0, 127, 255, 0.2);
+            --border-glow: rgba(58, 123, 203, 0.2);
 
             --text-primary: #e6edf3;
             --text-secondary: #8b949e;
             --text-muted: #484f58;
 
             /* Freenet brand colors */
-            --accent-primary: #007FFF;
-            --accent-light: #7ecfef;
-            --accent-dark: #0052cc;
-            --accent-glow: rgba(0, 127, 255, 0.4);
+            --accent-primary: #3a7bcb;
+            --accent-light: #85c8e6;
+            --accent-dark: #26569f;
+            --accent-glow: rgba(58, 123, 203, 0.4);
 
             /* Event/op colors: Solarized accents paired with brand cyan for conn.
                Hand-picked palette (Ethan Schoonover, 2011) avoids the Tailwind-default
                look and stays legible against #06080c. */
-            --color-connect: #7ecfef;
+            --color-connect: #85c8e6;
             --color-put: #b58900;
             --color-get: #859900;
             --color-update: #6c71c4;
@@ -37,7 +37,7 @@
             --bg-tertiary: #cbd5e1;
             --bg-panel: rgba(255, 255, 255, 0.85);
             --border-color: rgba(148, 163, 184, 0.5);
-            --border-glow: rgba(0, 127, 255, 0.15);
+            --border-glow: rgba(58, 123, 203, 0.15);
             --text-primary: #0f172a;
             --text-secondary: #475569;
             --text-muted: #94a3b8;
@@ -45,7 +45,7 @@
 
         [data-theme="light"] body::before {
             background:
-                radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.03) 0%, transparent 55%);
+                radial-gradient(ellipse at 50% 0%, rgba(58, 123, 203, 0.03) 0%, transparent 55%);
         }
 
         [data-theme="light"] .contract-search-input {
@@ -90,7 +90,7 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: radial-gradient(ellipse at 50% 0%, rgba(0, 127, 255, 0.04) 0%, transparent 55%);
+            background: radial-gradient(ellipse at 50% 0%, rgba(58, 123, 203, 0.04) 0%, transparent 55%);
             pointer-events: none;
             z-index: 0;
         }

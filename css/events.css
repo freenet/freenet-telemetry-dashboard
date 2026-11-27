@@ -10,7 +10,7 @@
             transition: all 0.15s;
         }
         .event-filter-link:hover {
-            background: rgba(0, 127, 255, 0.2);
+            background: rgba(58, 123, 203, 0.2);
             color: var(--accent-primary);
         }
         .event-filter-link.active {
