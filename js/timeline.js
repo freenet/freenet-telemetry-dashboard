@@ -384,9 +384,9 @@ function drawReplayHighlight(ctx, width, height, tNow, totalDurationNs) {
     if (isDragging && dragStartX !== null && dragCurrentX !== null) {
         const x1 = Math.min(dragStartX, dragCurrentX);
         const x2 = Math.max(dragStartX, dragCurrentX);
-        ctx.fillStyle = isLight ? 'rgba(0, 127, 255, 0.15)' : 'rgba(0, 180, 255, 0.12)';
+        ctx.fillStyle = isLight ? 'rgba(58, 123, 203, 0.15)' : 'rgba(0, 180, 255, 0.12)';
         ctx.fillRect(x1, 0, x2 - x1, height);
-        ctx.strokeStyle = isLight ? 'rgba(0, 127, 255, 0.5)' : 'rgba(0, 180, 255, 0.4)';
+        ctx.strokeStyle = isLight ? 'rgba(58, 123, 203, 0.5)' : 'rgba(0, 180, 255, 0.4)';
         ctx.lineWidth = 1;
         ctx.strokeRect(x1, 0, x2 - x1, height);
         return;
@@ -405,7 +405,7 @@ function drawReplayHighlight(ctx, width, height, tNow, totalDurationNs) {
     ctx.fillRect(right, 0, width - right, height);
 
     // Highlight border
-    ctx.strokeStyle = isLight ? 'rgba(0, 127, 255, 0.6)' : 'rgba(0, 180, 255, 0.5)';
+    ctx.strokeStyle = isLight ? 'rgba(58, 123, 203, 0.6)' : 'rgba(0, 180, 255, 0.5)';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(left, 0, right - left, height);
 
@@ -417,7 +417,7 @@ function drawReplayHighlight(ctx, width, height, tNow, totalDurationNs) {
         ctx.font = 'bold 11px "IBM Plex Mono", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = isLight ? 'rgba(0, 127, 255, 0.8)' : 'rgba(0, 180, 255, 0.8)';
+        ctx.fillStyle = isLight ? 'rgba(58, 123, 203, 0.8)' : 'rgba(0, 180, 255, 0.8)';
         ctx.fillText('PAUSED', centerX, 2);
     }
 }

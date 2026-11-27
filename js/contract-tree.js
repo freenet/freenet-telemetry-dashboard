@@ -470,7 +470,7 @@ function layoutTree(roots, children, allNodes, canvasWidth, canvasHeight) {
 // ============================================================================
 
 const EVENT_COLORS = {
-    connect: '#7ecfef',
+    connect: '#85c8e6',
     put: '#b58900',
     get: '#859900',
     update: '#6c71c4',
@@ -505,7 +505,7 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
             // Slight curve for readability
             const midY = (pos.y + kidPos.y) / 2;
             ctx.bezierCurveTo(pos.x, midY, kidPos.x, midY, kidPos.x, kidPos.y);
-            ctx.strokeStyle = 'rgba(126, 207, 239, 0.35)';
+            ctx.strokeStyle = 'rgba(133, 200, 230, 0.35)';
             ctx.lineWidth = 1.5;
             ctx.stroke();
         }
@@ -580,8 +580,8 @@ function drawContractTree(ctx, layoutData, treeData, peers, subscriberPeerIds, c
         }
 
         if (isPeerSelected) {
-            fillColor = '#7ecfef';
-            glowColor = 'rgba(126, 207, 239, 0.5)';
+            fillColor = '#85c8e6';
+            glowColor = 'rgba(133, 200, 230, 0.5)';
         }
 
         // State hash convergence tinting

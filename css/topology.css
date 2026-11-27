@@ -83,7 +83,7 @@
 
         .legend-marker.selected {
             background: var(--accent-light);
-            box-shadow: 0 0 8px rgba(126, 207, 239, 0.5);
+            box-shadow: 0 0 8px rgba(133, 200, 230, 0.5);
         }
 
         .legend-marker.subscriber {
@@ -234,7 +234,7 @@
         .ring-container svg {
             max-width: 100%;
             height: auto;
-            filter: drop-shadow(0 0 40px rgba(0, 127, 255, 0.15));
+            filter: drop-shadow(0 0 40px rgba(58, 123, 203, 0.15));
         }
 
         .peer-node {

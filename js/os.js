@@ -15,7 +15,7 @@ const FAMILY_ORDER = ['linux', 'windows', 'macos', 'android'];
 
 const FAMILY_COLOR = {
     linux: '#859900',
-    windows: '#007FFF',
+    windows: '#3a7bcb',
     macos: '#94a3b8',
     android: '#6c71c4',
     other: '#b58900',

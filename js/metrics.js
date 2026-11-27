@@ -18,7 +18,7 @@ function getColors() {
         put: '#b58900',
         get: '#859900',
         update: '#6c71c4',
-        peers: '#7ecfef',
+        peers: '#85c8e6',
         grid: light ? 'rgba(148, 163, 184, 0.25)' : 'rgba(48, 54, 61, 0.3)',
         text: light ? '#475569' : '#8b949e',
         textMuted: light ? '#94a3b8' : '#484f58',
